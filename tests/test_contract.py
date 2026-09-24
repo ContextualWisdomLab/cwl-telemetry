@@ -61,8 +61,8 @@ def test_event_admission_rejects_raw_secrets_pii_and_unknown_fields() -> None:
             ))
 
 
-def test_bootstrap_is_explicit_and_transaction_survives_export_failure(monkeypatch) -> None:
-    """Ordinary work remains successful when the OTLP export path fails."""
+def test_bootstrap_is_explicit_and_product_work_completes() -> None:
+    """An in-process runtime exposes the three safe Ports."""
     from cwl_telemetry import TelemetryConfig, TelemetryEvent, bootstrap
 
     config = TelemetryConfig(
@@ -78,4 +78,71 @@ def test_bootstrap_is_explicit_and_transaction_survives_export_failure(monkeypat
         name="work.completed", severity="INFO", classification="internal",
         purpose_code="operations", kind="operational", attributes={"operation_code": "work"},
     ))
+    runtime.shutdown()
+
+
+def test_logger_failure_does_not_fail_work_but_invalid_event_does() -> None:
+    """Delivery failure is noncritical; admission failure remains visible."""
+    from cwl_telemetry import TelemetryConfig, TelemetryEvent, bootstrap
+
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+    ))
+
+    class FailingLogger:
+        """Synthetic failing sink behind the real product Port."""
+
+        def emit(self, **_kwargs):
+            """Fail after admission, like a broken exporter."""
+            raise OSError("receiver unavailable")
+
+    runtime.logger._logger = FailingLogger()
+    event = TelemetryEvent(
+        name="work.completed", severity="INFO", classification="internal",
+        purpose_code="operations", kind="operational", attributes={"operation_code": "work"},
+    )
+    runtime.emit(event)
+    assert runtime.logger.dropped == 1
+    with pytest.raises(ValueError):
+        runtime.emit(TelemetryEvent(
+            name="work.completed", severity="INFO", classification="internal",
+            purpose_code="operations", kind="operational", attributes={"Authorization": "secret"},
+        ))
+    runtime.shutdown()
+
+
+def test_receiver_outage_keeps_transaction_and_credentials_private(caplog) -> None:
+    """An unreachable local TLS receiver cannot turn a product action into failure."""
+    from cwl_telemetry import TelemetryConfig, TelemetryEvent, bootstrap
+
+    token = "sentinel-private-token-12345"
+    config = TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+        receiver="https://127.0.0.1:1", token=token, queue_size=16,
+    )
+    assert token not in repr(config)
+    runtime = bootstrap(config)
+    with runtime.tracer.start_as_current_span("work"):
+        assert 2 + 2 == 4
+    runtime.emit(TelemetryEvent(
+        name="work.completed", severity="INFO", classification="internal",
+        purpose_code="operations", kind="operational", attributes={"operation_code": "work"},
+    ))
+    runtime.shutdown()
+    assert token not in caplog.text
+
+
+def test_metric_and_span_ports_reject_unbounded_attributes() -> None:
+    """Product code cannot add arbitrary span content or metric labels."""
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+    ))
+    with pytest.raises(ValueError):
+        runtime.tracer.start_as_current_span("work", {"prompt": "secret"})
+    counter = runtime.meter.counter("work_total")
+    with pytest.raises(ValueError):
+        counter.add(1, {"tenant_ref": "t_123"})
+    counter.add(1, {"operation_code": "work", "status": "success"})
     runtime.shutdown()
