@@ -58,6 +58,9 @@ def test_security_decoder_rejects_hostile_records_and_persists_outbox(tmp_path: 
     """Only one bounded, fresh, tenant-bound event reaches the durable outbox."""
     database = tmp_path / "replay.sqlite"
     with sqlite3.connect(database) as connection:
+        assert pending_security_events(connection) == []
+        with pytest.raises(ValueError, match="unknown"):
+            mark_security_delivered(connection, "b" * 32)
         request = _request()
         payload = request.SerializeToString()
         accepted = decode_security_export(payload, authenticated_tenant="tenant_1", replay_db=connection, now_ns=NOW)

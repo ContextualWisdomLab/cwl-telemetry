@@ -35,6 +35,14 @@ def _attributes(items: Any) -> dict[str, str | int | float | bool]:
     return result
 
 
+def _ensure_outbox(replay_db: sqlite3.Connection) -> None:
+    replay_db.execute(
+        "CREATE TABLE IF NOT EXISTS security_event_outbox "
+        "(event_id TEXT PRIMARY KEY, record_json TEXT NOT NULL, time_unix_nano INTEGER NOT NULL, "
+        "delivered INTEGER NOT NULL DEFAULT 0)"
+    )
+
+
 def decode_security_export(
     payload: bytes, *, authenticated_tenant: str, replay_db: sqlite3.Connection,
     now_ns: int | None = None, max_pending: int = 100_000,
@@ -103,11 +111,7 @@ def decode_security_export(
                 })
     if not projected:
         raise ValueError("empty security batch")
-    replay_db.execute(
-        "CREATE TABLE IF NOT EXISTS security_event_outbox "
-        "(event_id TEXT PRIMARY KEY, record_json TEXT NOT NULL, time_unix_nano INTEGER NOT NULL, "
-        "delivered INTEGER NOT NULL DEFAULT 0)"
-    )
+    _ensure_outbox(replay_db)
     try:
         replay_db.execute("BEGIN IMMEDIATE")
         replay_db.execute(
@@ -150,6 +154,7 @@ def pending_security_events(replay_db: sqlite3.Connection, limit: int = 100) -> 
     """Read undelivered normalized records for a separate SIEM sender."""
     if not 1 <= limit <= 1000:
         raise ValueError("invalid pending batch size")
+    _ensure_outbox(replay_db)
     rows = replay_db.execute(
         "SELECT record_json FROM security_event_outbox WHERE delivered = 0 ORDER BY rowid LIMIT ?",
         (limit,),
@@ -159,6 +164,7 @@ def pending_security_events(replay_db: sqlite3.Connection, limit: int = 100) -> 
 
 def mark_security_delivered(replay_db: sqlite3.Connection, event_id: str) -> None:
     """Mark one record only after an authenticated SIEM acknowledgement."""
+    _ensure_outbox(replay_db)
     with replay_db:
         changed = replay_db.execute(
             "UPDATE security_event_outbox SET delivered = 1 WHERE event_id = ? AND delivered = 0",
