@@ -5,8 +5,11 @@ from __future__ import annotations
 import sqlite3
 import ssl
 import subprocess
+import sys
 import threading
 import time
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -18,6 +21,7 @@ from cwl_telemetry.security import (
     decode_security_export, mark_security_delivered, pending_security_events,
 )
 from cwl_telemetry.security_consumer import make_security_server
+from cwl_telemetry.security_sender import deliver_pending
 
 
 NOW = 1_000_000_000_000_000_000
@@ -215,3 +219,95 @@ def test_https_consumer_admits_only_tenant_bound_otlp_and_recovers(tmp_path: Pat
             replay_db=recovered, max_pending=1,
         )
         assert [row["event_id"] for row in pending_security_events(recovered)] == ["c" * 32]
+
+
+def test_siem_handoff_keeps_outbox_pending_until_exact_https_ack(tmp_path: Path) -> None:
+    """Outage, wrong acknowledgement, and redirect cannot acknowledge an event."""
+    certificate = tmp_path / "gateway.crt"
+    private_key = tmp_path / "gateway.key"
+    subprocess.run([
+        "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1",
+        "-keyout", str(private_key), "-out", str(certificate), "-days", "1",
+    ], check=True, capture_output=True)
+    outbox = tmp_path / "security.sqlite"
+    with sqlite3.connect(outbox) as connection:
+        decode_security_export(
+            _request().SerializeToString(), authenticated_tenant="tenant_1",
+            replay_db=connection, now_ns=NOW,
+        )
+    outbox.chmod(0o600)
+    mode = {"value": "outage"}
+    captured = []
+    token = "synthetic-siem-token-12345"
+
+    class Gateway(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            captured.append((self.path, self.headers.get("Authorization"),
+                             self.headers.get("Idempotency-Key"), body))
+            if mode["value"] == "outage":
+                self.send_response(503)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if mode["value"] == "redirect":
+                self.send_response(307)
+                self.send_header("Location", "https://untrusted.example/v1/security-events")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            event_id = "f" * 32 if mode["value"] == "wrong_ack" else "b" * 32
+            response = json.dumps({"accepted": True, "event_id": event_id}).encode()
+            if mode["value"] == "duplicate_ack":
+                response = response[:-1] + f', "event_id": "{event_id}"}}'.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+    server = HTTPServer(("127.0.0.1", 0), Gateway)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(str(certificate), str(private_key))
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    gateway = f"https://127.0.0.1:{server.server_port}"
+    try:
+        rejected_cli = subprocess.run(
+            [sys.executable, "-m", "cwl_telemetry.security_sender",
+             "--outbox", str(outbox), "--gateway", "http://127.0.0.1"],
+            input=token + "\n", capture_output=True, text=True, check=False,
+        )
+        assert rejected_cli.returncode != 0
+        assert token not in rejected_cli.stderr
+        with pytest.raises(ValueError, match="origin"):
+            deliver_pending(outbox, gateway="http://127.0.0.1", token=token)
+        with pytest.raises(HTTPError):
+            deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate)
+        mode["value"] = "wrong_ack"
+        with pytest.raises(ValueError, match="acknowledgement"):
+            deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate)
+        mode["value"] = "duplicate_ack"
+        with pytest.raises(ValueError, match="acknowledgement"):
+            deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate)
+        mode["value"] = "redirect"
+        with pytest.raises(HTTPError):
+            deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate)
+        with sqlite3.connect(outbox) as connection:
+            assert [row["event_id"] for row in pending_security_events(connection)] == ["b" * 32]
+        mode["value"] = "ready"
+        assert deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate) == 1
+        assert deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate) == 0
+        assert captured[-1][:3] == ("/v1/security-events", f"Bearer {token}", "b" * 32)
+        assert json.loads(captured[-1][3])["event_name"] == "authentication.denied"
+        with sqlite3.connect(outbox) as connection:
+            assert pending_security_events(connection) == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=5)

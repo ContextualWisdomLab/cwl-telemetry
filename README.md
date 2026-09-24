@@ -66,11 +66,25 @@ five minutes ahead. Delivered event IDs remain reserved for that window. The
 security exporter disables its default gzip compression because this receiver
 admits only bounded protobuf bodies without content encoding.
 
-The security operator sends `pending_security_events()` to its approved SIEM
-destination and calls `mark_security_delivered()` only after a positive
-downstream acknowledgement. No SIEM sender is bundled because no destination
-or acknowledgement contract has been selected. The receiver cannot execute a
-domain command or change authorization.
+The security operator can run one sender per outbox against an approved HTTPS
+SIEM gateway. The token enters on standard input, never as a command argument:
+
+```sh
+python -m cwl_telemetry.security_sender \
+  --outbox /var/lib/cwl-telemetry/security.sqlite \
+  --gateway https://siem-gateway.example \
+  --ca-file /run/secrets/siem-ca.crt < /run/secrets/siem-token
+```
+
+The sender posts one normalized JSON event to `/v1/security-events` with its
+event ID as an idempotency key. It marks the outbox row delivered only after a
+`200 application/json` acknowledgement containing exactly
+`{"accepted": true, "event_id": "<same ID>"}`. Failed TLS, HTTP, redirect,
+or acknowledgement leaves the row pending for the next operator-scheduled run.
+The gateway must honor idempotency because an acknowledgement can be lost after
+it accepts an event. A compatible approved destination, operator schedule,
+retention policy, and live SIEM acknowledgement are still unverified. The
+receiver cannot execute a domain command or change authorization.
 
 If the Collector is unavailable, product transactions continue and the SDK's
 bounded queue may drop old operational signals. When the Collector's backend
