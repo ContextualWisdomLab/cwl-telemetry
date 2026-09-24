@@ -34,12 +34,25 @@ _HEX_IDENTITIES = {"request_id": 32, "trace_id": 32, "span_id": 16}
 _CLASSIFICATIONS = frozenset({"public", "internal", "confidential", "restricted"})
 _PURPOSES = frozenset({"operations", "performance", "reliability", "security_investigation"})
 _SEVERITIES = frozenset({"DEBUG", "INFO", "WARN", "ERROR"})
+_METRIC_OUTCOMES = frozenset({"success", "failure", "timeout", "cancelled", "unknown"})
 
 
 def _require_match(value: str, pattern: re.Pattern[str], field_name: str) -> None:
     """Reject unbounded or ambiguous identity and code fields."""
     if not isinstance(value, str) or pattern.fullmatch(value) is None:
         raise ValueError(f"invalid {field_name}")
+
+
+def _bounded_codes(values: object, field_name: str) -> frozenset[str]:
+    """Freeze a finite product-declared label vocabulary."""
+    if not isinstance(values, (set, frozenset, tuple, list)) or len(values) > 128:
+        raise ValueError(f"invalid {field_name}")
+    result = frozenset(values)
+    if len(result) != len(values):
+        raise ValueError(f"duplicate {field_name}")
+    for value in result:
+        _require_match(value, _CODE, field_name)
+    return result
 
 
 @dataclass(frozen=True)
@@ -53,6 +66,10 @@ class TelemetryConfig:
     receiver: str | None = None
     token: str | None = field(default=None, repr=False)
     queue_size: int = 2048
+    metric_names: frozenset[str] = frozenset()
+    operation_codes: frozenset[str] = frozenset()
+    bounded_contexts: frozenset[str] = frozenset()
+    dependencies: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         """Validate configuration before any provider or exporter exists."""
@@ -62,6 +79,8 @@ class TelemetryConfig:
         _require_match(self.source_revision, _REVISION, "source_revision")
         if not isinstance(self.queue_size, int) or not 16 <= self.queue_size <= 10_000:
             raise ValueError("invalid queue_size")
+        for key in ("metric_names", "operation_codes", "bounded_contexts", "dependencies"):
+            object.__setattr__(self, key, _bounded_codes(getattr(self, key), key))
         if self.receiver is None:
             if self.token is not None:
                 raise ValueError("token requires a receiver")
@@ -74,6 +93,8 @@ class TelemetryConfig:
         except ValueError:
             valid_port = False
         if (
+            any(ord(character) <= 32 for character in self.receiver)
+            or
             parsed.scheme != "https" or not parsed.hostname or not valid_port
             or parsed.username or parsed.password or parsed.query or parsed.fragment
             or parsed.path not in ("", "/")
@@ -184,13 +205,17 @@ class _TracerPort:
 class _MeterPort:
     """Create counters whose labels have bounded cardinality."""
 
-    def __init__(self, meter: Any) -> None:
+    def __init__(self, meter: Any, config: TelemetryConfig) -> None:
         self._meter = meter
+        self._config = config
 
     def counter(self, name: str) -> Any:
         """Return a counter with an admitted-add operation."""
         _require_match(name, _CODE, "metric name")
+        if name not in self._config.metric_names:
+            raise ValueError("undeclared metric name")
         instrument = self._meter.create_counter(name)
+        config = self._config
 
         class Counter:
             """Small metric Port with a fixed label vocabulary."""
@@ -199,7 +224,17 @@ class _MeterPort:
                 """Reject high-cardinality labels before recording."""
                 if type(value) is not int or value < 0:
                     raise ValueError("invalid counter increment")
-                instrument.add(value, attributes=_validate_attributes(attributes or {}, _METRIC_LABELS))
+                safe = _validate_attributes(attributes or {}, _METRIC_LABELS)
+                declared = {
+                    "operation_code": config.operation_codes,
+                    "bounded_context": config.bounded_contexts,
+                    "dependency": config.dependencies,
+                    "result": _METRIC_OUTCOMES,
+                    "status": _METRIC_OUTCOMES,
+                }
+                if any(item not in declared[key] for key, item in safe.items()):
+                    raise ValueError("undeclared metric label")
+                instrument.add(value, attributes=safe)
 
         return Counter()
 
@@ -276,7 +311,7 @@ def bootstrap(config: TelemetryConfig) -> TelemetryRuntime:
         ))
     return TelemetryRuntime(
         tracer=_TracerPort(tracer_provider.get_tracer(config.service, config.version)),
-        meter=_MeterPort(meter_provider.get_meter(config.service, config.version)),
+        meter=_MeterPort(meter_provider.get_meter(config.service, config.version), config),
         logger=_LoggerPort(logger_provider.get_logger(config.service, config.version)),
         _providers=(tracer_provider, meter_provider, logger_provider),
     )

@@ -138,6 +138,7 @@ def test_metric_and_span_ports_reject_unbounded_attributes() -> None:
 
     runtime = bootstrap(TelemetryConfig(
         service="svc", version="1", environment="test", source_revision="a" * 40,
+        metric_names=frozenset({"work_total"}), operation_codes=frozenset({"work"}),
     ))
     with pytest.raises(ValueError):
         runtime.tracer.start_as_current_span("work", {"prompt": "secret"})
@@ -145,4 +146,21 @@ def test_metric_and_span_ports_reject_unbounded_attributes() -> None:
     with pytest.raises(ValueError):
         counter.add(1, {"tenant_ref": "t_123"})
     counter.add(1, {"operation_code": "work", "status": "success"})
+    with pytest.raises(ValueError):
+        counter.add(1, {"operation_code": "per_user_123"})
+    with pytest.raises(ValueError):
+        runtime.meter.counter("unregistered_total")
     runtime.shutdown()
+
+
+def test_receiver_rejects_url_control_characters_and_label_sets() -> None:
+    """Configuration cannot smuggle a different endpoint or unlimited labels."""
+    from cwl_telemetry import TelemetryConfig
+
+    base = dict(service="svc", version="1", environment="test", source_revision="a" * 40)
+    with pytest.raises(ValueError):
+        TelemetryConfig(**base, receiver="https://collector.example\n.evil", token="x" * 16)
+    with pytest.raises(ValueError):
+        TelemetryConfig(**base, metric_names=["same", "same"])
+    with pytest.raises(ValueError):
+        TelemetryConfig(**base, operation_codes={f"item_{n}" for n in range(129)})
