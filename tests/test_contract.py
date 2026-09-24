@@ -60,6 +60,7 @@ def test_event_admission_rejects_raw_secrets_pii_and_unknown_fields() -> None:
         {"unknown": "value"},
         {"operation_code": "x" * 200},
         {"source_location": "../../secrets.env:1"},
+        {"duration_ms": 10 ** 1000},
     ):
         with pytest.raises(ValueError):
             validate_event(TelemetryEvent(

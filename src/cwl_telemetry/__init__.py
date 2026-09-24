@@ -150,7 +150,8 @@ def _validate_attributes(attributes: Mapping[str, object], allowed: frozenset[st
         if key not in allowed:
             raise ValueError("unknown telemetry attribute")
         if key in ("retry_count", "duration_ms"):
-            if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1_000_000_000:
+            if (type(value) not in (int, float) or not 0 <= value <= 1_000_000_000
+                    or (type(value) is float and not math.isfinite(value))):
                 raise ValueError("invalid numeric telemetry attribute")
         elif type(value) is not str:
             raise ValueError("invalid telemetry attribute")
