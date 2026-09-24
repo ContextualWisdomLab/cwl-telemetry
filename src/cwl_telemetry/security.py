@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
-import json
 from typing import Any
 
 from google.protobuf.message import DecodeError
@@ -18,6 +18,8 @@ _RESOURCE_KEYS = frozenset({
 })
 _SEVERITY_NUMBERS = {"DEBUG": range(5, 9), "INFO": range(9, 13),
                      "WARN": range(13, 17), "ERROR": range(17, 21)}
+_MAX_AGE_NS = 7 * 24 * 60 * 60 * 1_000_000_000
+_FUTURE_SKEW_NS = 5 * 60 * 1_000_000_000
 
 
 def _attributes(items: Any) -> dict[str, str | int | float | bool]:
@@ -35,9 +37,9 @@ def _attributes(items: Any) -> dict[str, str | int | float | bool]:
 
 def decode_security_export(
     payload: bytes, *, authenticated_tenant: str, replay_db: sqlite3.Connection,
-    now_ns: int | None = None,
+    now_ns: int | None = None, max_pending: int = 100_000,
 ) -> list[dict[str, Any]]:
-    """Validate one authenticated OTLP batch and durably reject replayed IDs.
+    """Validate one authenticated OTLP batch and durably deduplicate event IDs.
 
     The caller owns TLS and bearer authentication, and must supply the tenant
     bound to that credential. This decoder never executes domain commands.
@@ -46,6 +48,8 @@ def decode_security_export(
         raise ValueError("invalid OTLP body size")
     if not isinstance(authenticated_tenant, str) or not authenticated_tenant:
         raise ValueError("missing authenticated tenant")
+    if type(max_pending) is not int or not 1 <= max_pending <= 1_000_000:
+        raise ValueError("invalid security outbox capacity")
     request = ExportLogsServiceRequest()
     try:
         request.ParseFromString(payload)
@@ -66,7 +70,9 @@ def decode_security_export(
         )
         for scope_logs in resource_logs.scope_logs:
             for record in scope_logs.log_records:
-                if record.dropped_attributes_count or abs(record.time_unix_nano - now) > 300_000_000_000:
+                if (record.dropped_attributes_count or record.time_unix_nano <= 0
+                        or now - record.time_unix_nano > _MAX_AGE_NS
+                        or record.time_unix_nano - now > _FUTURE_SKEW_NS):
                     raise ValueError("incomplete or stale security event")
                 attributes = _attributes(record.attributes)
                 if attributes.pop("cwl.schema_version", None) != "1" or attributes.pop("cwl.kind", None) != "security":
@@ -99,16 +105,44 @@ def decode_security_export(
         raise ValueError("empty security batch")
     replay_db.execute(
         "CREATE TABLE IF NOT EXISTS security_event_outbox "
-        "(event_id TEXT PRIMARY KEY, record_json TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0)"
+        "(event_id TEXT PRIMARY KEY, record_json TEXT NOT NULL, time_unix_nano INTEGER NOT NULL, "
+        "delivered INTEGER NOT NULL DEFAULT 0)"
     )
     try:
-        with replay_db:
-            replay_db.executemany(
-                "INSERT INTO security_event_outbox (event_id, record_json) VALUES (?, ?)",
-                [(row["event_id"], json.dumps(row, sort_keys=True)) for row in projected],
-            )
-    except sqlite3.IntegrityError as error:
-        raise ValueError("replayed security event") from error
+        replay_db.execute("BEGIN IMMEDIATE")
+        replay_db.execute(
+            "DELETE FROM security_event_outbox WHERE delivered = 1 AND time_unix_nano < ?",
+            (now - _MAX_AGE_NS,),
+        )
+        new_rows = []
+        seen = {}
+        for row in projected:
+            encoded = json.dumps(row, sort_keys=True)
+            event_id = row["event_id"]
+            previous = seen.get(event_id)
+            if previous is None:
+                existing = replay_db.execute(
+                    "SELECT record_json FROM security_event_outbox WHERE event_id = ?", (event_id,),
+                ).fetchone()
+                previous = existing[0] if existing else None
+            if previous is not None and previous != encoded:
+                raise ValueError("conflicting security event ID")
+            if previous is None:
+                new_rows.append((event_id, encoded, row["time_unix_nano"]))
+            seen[event_id] = encoded
+        pending = replay_db.execute(
+            "SELECT COUNT(*) FROM security_event_outbox WHERE delivered = 0"
+        ).fetchone()[0]
+        if pending + len(new_rows) > max_pending:
+            raise ValueError("security outbox full")
+        replay_db.executemany(
+            "INSERT INTO security_event_outbox (event_id, record_json, time_unix_nano) VALUES (?, ?, ?)",
+            new_rows,
+        )
+        replay_db.commit()
+    except Exception:
+        replay_db.rollback()
+        raise
     return projected
 
 

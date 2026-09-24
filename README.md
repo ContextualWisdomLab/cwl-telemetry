@@ -42,20 +42,40 @@ domain events must use a separate durable product outbox.
 The [production Collector template](collector/production.yaml) has separate
 authenticated HTTPS outputs for the operational backend and security consumer.
 Only records classified as schema-v1 security events enter the latter route;
-the consumer must still run `decode_security_export()` against a persistent
-SQLite database and send `pending_security_events()` to its SIEM destination.
-It calls `mark_security_delivered()` only after a positive downstream
-acknowledgement. The decoder requires the tenant bound to the authenticated
-transport; a payload-provided tenant never authenticates itself. It cannot
-execute a domain command or change authorization.
+run one Collector and security consumer per tenant with distinct ingress and
+consumer tokens. Start the included receiver with:
+
+```sh
+python -m cwl_telemetry.security_consumer \
+  --certificate /run/secrets/receiver.crt \
+  --private-key /run/secrets/receiver.key \
+  --token-file /run/secrets/security-consumer-token \
+  --tenant-ref tenant_1 \
+  --outbox /var/lib/cwl-telemetry/security.sqlite \
+  --listen 0.0.0.0
+```
+
+Mount a persistent
+outbox directory and set the Collector's security output URL to this receiver's
+HTTPS origin. The receiver creates a private SQLite outbox, admits only the
+credential-bound tenant, and acknowledges an identical retry without storing a
+second record. A reused event ID with different content is rejected. Events
+may arrive up to seven days late to allow Collector recovery; clocks may be
+five minutes ahead. Delivered event IDs remain reserved for that window.
+
+The security operator sends `pending_security_events()` to its approved SIEM
+destination and calls `mark_security_delivered()` only after a positive
+downstream acknowledgement. No SIEM sender is bundled because no destination
+or acknowledgement contract has been selected. The receiver cannot execute a
+domain command or change authorization.
 
 If the Collector is unavailable, product transactions continue and the SDK's
 bounded queue may drop old operational signals. When the Collector's backend
 or security consumer is unavailable, its persistent outbound queue retries
 with backoff. A full outbound queue must surface as a receiver/export error;
 operators must alert on drops and queue capacity. The security consumer's
-SQLite outbox survives a restart and retries pending rows after SIEM recovery.
-Duplicate event IDs are rejected. Product audit/outbox delivery is outside this
+SQLite outbox survives a restart. The operator's SIEM sender retries pending
+rows after recovery. Product audit/outbox delivery is outside this
 telemetry path.
 
 ## Verification and release boundary
@@ -63,7 +83,7 @@ telemetry path.
 Run `uv run pytest -q` and `uv build`. The tests use a pinned Collector image
 for TLS, bearer, content-type, size, operational/security routing, and real
 SDK trace/log/metric export. They test malformed schema, stale timestamps,
-tenant mismatch, replay, and a persisted pending security event. No live
-backend or SIEM has been verified. The security consumer HTTP service,
-operator-managed retention, persistent-volume deployment, and a released
-consumer migration remain required before this draft is production-ready.
+tenant mismatch, idempotent retry, conflicting replay, HTTPS admission, and a
+persisted pending security event. No live backend or SIEM has been verified.
+Operator-managed retention, persistent-volume deployment, an approved SIEM
+sender, and a released consumer migration remain required before production.

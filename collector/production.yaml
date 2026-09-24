@@ -30,6 +30,10 @@ processors:
   batch:
     timeout: 1s
     send_batch_size: 128
+  batch/security:
+    timeout: 1s
+    send_batch_size: 1
+    send_batch_max_size: 1
   filter/security:
     error_mode: propagate
     log_conditions:
@@ -87,5 +91,5 @@ service:
       exporters: [otlphttp/backend]
     logs/security:
       receivers: [otlp]
-      processors: [memory_limiter, filter/security, batch]
+      processors: [memory_limiter, filter/security, batch/security]
       exporters: [otlphttp/security]
