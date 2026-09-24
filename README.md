@@ -42,7 +42,8 @@ domain events must use a separate durable product outbox.
 The [production Collector template](collector/production.yaml) has separate
 authenticated HTTPS outputs for the operational backend and security consumer.
 Only records classified as schema-v1 security events enter the latter route;
-run one Collector and security consumer per tenant with distinct ingress and
+the operational log route excludes those records. Run one Collector and
+security consumer per tenant with distinct ingress and
 consumer tokens. Start the included receiver with:
 
 ```sh

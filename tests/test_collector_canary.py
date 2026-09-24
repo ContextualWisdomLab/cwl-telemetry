@@ -138,7 +138,8 @@ def test_collector_rejects_invalid_tls_auth_type_size_and_payload() -> None:
                 trace_count = sum(int(count) for count in re.findall(
                     r'"otelcol.signal": "traces"[^\n]*"spans": (\d+)', logs,
                 ))
-                if (trace_count >= 2 and '"log records": 2' in logs
+                if (trace_count >= 2
+                        and re.search(r'"otelcol.component.id": "debug"[^\n]*"log records": 1', logs)
                         and re.search(r'"otelcol.component.id": "debug/security"[^\n]*"log records": 1', logs)
                         and '"data points": 1' in logs):
                     break
