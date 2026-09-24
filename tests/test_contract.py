@@ -76,7 +76,6 @@ def test_bootstrap_is_explicit_and_product_work_completes() -> None:
     )
     runtime = bootstrap(config)
     assert runtime.tracer is not None
-    assert runtime.tracer_provider is runtime._providers[0]
     assert runtime.meter is not None
     assert runtime.logger is not None
     with runtime.tracer.start_as_current_span("work"):
@@ -170,7 +169,25 @@ def test_span_context_does_not_record_exception_content() -> None:
     with pytest.raises(RuntimeError):
         with runtime.tracer.start_as_current_span("work") as span:
             raise RuntimeError("synthetic-secret-in-exception")
-    assert span.events == ()
+    assert span._span.events == ()
+    runtime.shutdown()
+
+
+def test_span_route_requires_declared_template_and_rejects_raw_path() -> None:
+    """Frameworks can label a route without adding request identifiers."""
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+        route_templates={"/api/items/{item_id}"},
+    ))
+    with runtime.tracer.start_as_current_span("http_request") as span:
+        span.set_attribute("http_route", "/api/items/{item_id}")
+        with pytest.raises(ValueError):
+            span.set_attribute("http_route", "/api/items/secret-123")
+        with pytest.raises(ValueError):
+            span.set_attribute("http_url", "https://example/private?token=secret")
+        assert not hasattr(span, "record_exception")
     runtime.shutdown()
 
 

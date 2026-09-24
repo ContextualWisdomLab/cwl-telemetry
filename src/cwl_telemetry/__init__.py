@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import math
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, ContextManager, Iterator, Mapping
 from urllib.parse import urlsplit
 
 
@@ -20,12 +21,13 @@ _TRACEPARENT = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
 _EVENT = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
 _CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _REFERENCE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_ROUTE_TEMPLATE = re.compile(r"^/(?:[A-Za-z0-9._-]+|\{[A-Za-z_][A-Za-z0-9_]*(?::[a-z]+)?\})(?:/(?:[A-Za-z0-9._-]+|\{[A-Za-z_][A-Za-z0-9_]*(?::[a-z]+)?\}))*$|^/$")
 _ATTRIBUTES = frozenset({
     "operation_code", "bounded_context", "tenant_ref", "workspace_ref",
     "principal_ref", "request_id", "event_id", "trace_id", "span_id", "resource_ref",
     "action", "result", "status", "error_type", "error_code",
     "retry_count", "duration_ms", "dependency", "provider",
-    "provenance_ref",
+    "provenance_ref", "http_route",
 })
 _METRIC_LABELS = frozenset({"operation_code", "bounded_context", "result", "status", "dependency"})
 _CODE_ATTRIBUTES = frozenset({
@@ -79,6 +81,7 @@ class TelemetryConfig:
     operation_codes: frozenset[str] = frozenset()
     bounded_contexts: frozenset[str] = frozenset()
     dependencies: frozenset[str] = frozenset()
+    route_templates: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         """Validate configuration before any provider or exporter exists."""
@@ -90,6 +93,15 @@ class TelemetryConfig:
             raise ValueError("invalid queue_size")
         for key in ("metric_names", "operation_codes", "bounded_contexts", "dependencies"):
             object.__setattr__(self, key, _bounded_codes(getattr(self, key), key))
+        if not isinstance(self.route_templates, (set, frozenset, tuple, list)) or len(self.route_templates) > 256:
+            raise ValueError("invalid route templates")
+        routes = frozenset(self.route_templates)
+        if len(routes) != len(self.route_templates):
+            raise ValueError("duplicate route template")
+        for route in routes:
+            if not isinstance(route, str) or len(route) > 128 or _ROUTE_TEMPLATE.fullmatch(route) is None:
+                raise ValueError("invalid route template")
+        object.__setattr__(self, "route_templates", routes)
         if self.receiver is None:
             if self.token is not None or self.ca_file is not None:
                 raise ValueError("receiver options require a receiver")
@@ -145,6 +157,9 @@ def _validate_attributes(attributes: Mapping[str, object], allowed: frozenset[st
                 raise ValueError("invalid correlation reference")
         elif key in _CODE_ATTRIBUTES:
             _require_match(value, _CODE, key)
+        elif key == "http_route":
+            if len(value) > 128 or _ROUTE_TEMPLATE.fullmatch(value) is None:
+                raise ValueError("invalid route template")
         elif _REFERENCE.fullmatch(value) is None:
             raise ValueError("invalid opaque reference")
         safe[key] = value
@@ -204,19 +219,42 @@ class _LoggerPort:
             self.dropped += 1
 
 
+class _SpanPort:
+    """Expose only bounded span attributes to product code."""
+
+    def __init__(self, span: Any, config: TelemetryConfig) -> None:
+        self._span = span
+        self._config = config
+
+    def set_attribute(self, key: str, value: object) -> None:
+        """Set an admitted attribute; route templates must be declared."""
+        safe = _validate_attributes({key: value}, _ATTRIBUTES)
+        if key == "http_route" and value not in self._config.route_templates:
+            raise ValueError("undeclared route template")
+        self._span.set_attribute(key, safe[key])
+
+
 class _TracerPort:
     """Start spans only with admitted names and attributes."""
 
-    def __init__(self, tracer: Any) -> None:
+    def __init__(self, tracer: Any, config: TelemetryConfig) -> None:
         self._tracer = tracer
+        self._config = config
 
-    def start_as_current_span(self, name: str, attributes: Mapping[str, object] | None = None) -> Any:
+    def start_as_current_span(self, name: str, attributes: Mapping[str, object] | None = None) -> ContextManager[_SpanPort]:
         """Return an OpenTelemetry span context manager with bounded input."""
         _require_match(name, _CODE, "span name")
         safe = _validate_attributes(attributes or {}, _ATTRIBUTES)
-        return self._tracer.start_as_current_span(
-            name, attributes=safe, record_exception=False, set_status_on_exception=False,
-        )
+        if "http_route" in safe and safe["http_route"] not in self._config.route_templates:
+            raise ValueError("undeclared route template")
+        @contextmanager
+        def current_span() -> Iterator[_SpanPort]:
+            with self._tracer.start_as_current_span(
+                name, attributes=safe, record_exception=False, set_status_on_exception=False,
+            ) as span:
+                yield _SpanPort(span, self._config)
+
+        return current_span()
 
 
 class _MeterPort:
@@ -264,11 +302,6 @@ class TelemetryRuntime:
     meter: _MeterPort
     logger: _LoggerPort
     _providers: tuple[Any, Any, Any] = field(repr=False)
-
-    @property
-    def tracer_provider(self) -> Any:
-        """Pass the shared trace provider to framework instrumentation."""
-        return self._providers[0]
 
     def emit(self, event: TelemetryEvent) -> None:
         """Emit an admitted structured record."""
@@ -355,7 +388,7 @@ def bootstrap(config: TelemetryConfig) -> TelemetryRuntime:
             max_export_batch_size=min(128, config.queue_size),
         ))
     return TelemetryRuntime(
-        tracer=_TracerPort(tracer_provider.get_tracer(config.service, config.version)),
+        tracer=_TracerPort(tracer_provider.get_tracer(config.service, config.version), config),
         meter=_MeterPort(meter_provider.get_meter(config.service, config.version), config),
         logger=_LoggerPort(logger_provider.get_logger(config.service, config.version)),
         _providers=(tracer_provider, meter_provider, logger_provider),
