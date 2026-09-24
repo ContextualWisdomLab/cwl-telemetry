@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -202,3 +203,44 @@ def test_resource_identity_is_exact_and_private() -> None:
     assert resource["deployment.environment.name"] == "prod"
     assert resource["cwl.source_revision"] == "a" * 40
     runtime.shutdown()
+
+
+def test_bounded_span_queue_reports_saturation_and_recovers(monkeypatch, caplog) -> None:
+    """A stuck receiver drops old spans without blocking work; newer work drains."""
+    from opentelemetry.exporter.otlp.proto.http import trace_exporter
+    from opentelemetry.sdk.trace.export import SpanExportResult
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    release = threading.Event()
+    exported: list[str] = []
+
+    class PausedExporter:
+        def __init__(self, **_kwargs):
+            pass
+
+        def export(self, spans):
+            release.wait(3)
+            exported.extend(span.name for span in spans)
+            return SpanExportResult.SUCCESS
+
+        def shutdown(self):
+            pass
+
+        def force_flush(self, timeout_millis=30000):
+            return True
+
+    monkeypatch.setattr(trace_exporter, "OTLPSpanExporter", PausedExporter)
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+        receiver="https://collector.example", token="synthetic-token-12345", queue_size=16,
+    ))
+    for _ in range(80):
+        with runtime.tracer.start_as_current_span("saturated"):
+            pass
+    with runtime.tracer.start_as_current_span("recovered"):
+        pass
+    release.set()
+    runtime.shutdown()
+    assert "Queue full, dropping Span" in caplog.text
+    assert "recovered" in exported
+    assert len(exported) < 81
