@@ -253,6 +253,11 @@ class TelemetryRuntime:
     logger: _LoggerPort
     _providers: tuple[Any, Any, Any] = field(repr=False)
 
+    @property
+    def tracer_provider(self) -> Any:
+        """Pass the shared trace provider to framework instrumentation."""
+        return self._providers[0]
+
     def emit(self, event: TelemetryEvent) -> None:
         """Emit an admitted structured record."""
         self.logger.emit(event)

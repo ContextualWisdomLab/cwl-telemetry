@@ -71,6 +71,7 @@ def test_bootstrap_is_explicit_and_product_work_completes() -> None:
     )
     runtime = bootstrap(config)
     assert runtime.tracer is not None
+    assert runtime.tracer_provider is runtime._providers[0]
     assert runtime.meter is not None
     assert runtime.logger is not None
     with runtime.tracer.start_as_current_span("work"):
