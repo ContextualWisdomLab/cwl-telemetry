@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import ssl
 import subprocess
 import tempfile
@@ -116,12 +117,18 @@ def test_collector_rejects_invalid_tls_auth_type_size_and_payload() -> None:
                     purpose_code="operations", kind="operational",
                     attributes={"operation_code": "canary"},
                 ))
+                runtime.emit(TelemetryEvent(
+                    name="authentication.denied", severity="WARN", classification="internal",
+                    purpose_code="security_investigation", kind="security",
+                    attributes={"operation_code": "canary"},
+                ))
                 runtime.meter.counter("canary_total").add(1, {"operation_code": "canary"})
             runtime.shutdown()
             for _ in range(30):
                 result = subprocess.run(["docker", "logs", container], capture_output=True, text=True, check=True)
                 logs = (result.stdout + result.stderr).replace(token, "<redacted>")
-                if ('"resource spans": 2' in logs and '"log records": 1' in logs
+                if ('"resource spans": 2' in logs and '"log records": 2' in logs
+                        and re.search(r'"otelcol.component.id": "debug/security"[^\n]*"log records": 1', logs)
                         and '"data points": 1' in logs):
                     break
                 time.sleep(0.1)

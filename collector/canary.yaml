@@ -24,9 +24,16 @@ processors:
   batch:
     timeout: 1s
     send_batch_size: 128
+  filter/security:
+    error_mode: propagate
+    log_conditions:
+      - 'log.attributes["cwl.kind"] != "security"'
+      - 'log.attributes["cwl.schema_version"] != "1"'
 
 exporters:
   debug:
+    verbosity: basic
+  debug/security:
     verbosity: basic
 
 service:
@@ -44,3 +51,7 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [debug]
+    logs/security:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/security, batch]
+      exporters: [debug/security]
