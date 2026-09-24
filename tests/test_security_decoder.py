@@ -83,3 +83,38 @@ def test_security_decoder_rejects_hostile_records_and_persists_outbox(tmp_path: 
         assert pending_security_events(recovered) == []
         with pytest.raises(ValueError):
             mark_security_delivered(recovered, "b" * 32)
+
+
+def test_real_sdk_security_log_decodes_without_extra_resource_fields(tmp_path: Path) -> None:
+    """The producer's actual OTLP encoding satisfies the consumer contract."""
+    from opentelemetry.exporter.otlp.proto.common._internal._log_encoder import encode_logs
+    from opentelemetry.sdk._logs.export import LogExportResult, SimpleLogRecordProcessor
+    from cwl_telemetry import TelemetryConfig, TelemetryEvent, bootstrap
+
+    captured = []
+
+    class Capture:
+        def export(self, batch):
+            captured.extend(batch)
+            return LogExportResult.SUCCESS
+
+        def shutdown(self):
+            pass
+
+        def force_flush(self, timeout_millis=30000):
+            return True
+
+    runtime = bootstrap(TelemetryConfig(
+        service="canary", version="0.1.0", environment="test", source_revision="a" * 40,
+    ))
+    runtime._providers[2].add_log_record_processor(SimpleLogRecordProcessor(Capture()))
+    runtime.emit(TelemetryEvent(
+        name="authentication.denied", severity="WARN", classification="internal",
+        purpose_code="security_investigation", kind="security",
+        attributes={"tenant_ref": "tenant_1", "event_id": "c" * 32, "operation_code": "login"},
+    ))
+    payload = encode_logs(captured).SerializeToString()
+    with sqlite3.connect(tmp_path / "real-sdk.sqlite") as connection:
+        rows = decode_security_export(payload, authenticated_tenant="tenant_1", replay_db=connection)
+        assert rows[0]["event_id"] == "c" * 32
+    runtime.shutdown()

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import re
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -207,6 +208,7 @@ class _LoggerPort:
 
         try:
             self._logger.emit(
+                timestamp=time.time_ns(),
                 severity_number=getattr(SeverityNumber, event.severity),
                 severity_text=event.severity,
                 body=event.name,
