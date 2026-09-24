@@ -27,7 +27,8 @@ processors:
   filter/operational:
     error_mode: propagate
     log_conditions:
-      - 'log.attributes["cwl.kind"] == "security"'
+      - 'log.attributes["cwl.kind"] != "operational"'
+      - 'log.attributes["cwl.schema_version"] != "1"'
   filter/security:
     error_mode: propagate
     log_conditions:

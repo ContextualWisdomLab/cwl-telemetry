@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceRequest
 from cwl_telemetry import TelemetryConfig, TelemetryEvent, bootstrap
 from cwl_telemetry.security import pending_security_events
 from cwl_telemetry.security_consumer import make_security_server
@@ -112,6 +113,25 @@ def test_collector_rejects_invalid_tls_auth_type_size_and_payload() -> None:
                 pass
             else:
                 assert plaintext_status != 200
+
+            unclassified = ExportLogsServiceRequest()
+            records = unclassified.resource_logs.add().scope_logs.add().log_records
+            for kind, schema in (("unknown", "1"), ("operational", "2")):
+                record = records.add()
+                for key, value in (("cwl.kind", kind), ("cwl.schema_version", schema)):
+                    attribute = record.attributes.add()
+                    attribute.key = key
+                    attribute.value.string_value = value
+            assert _request(
+                url.replace("/v1/traces", "/v1/logs"), unclassified.SerializeToString(),
+                token=token, content_type="application/x-protobuf", context=context,
+            ) == 200
+            time.sleep(1.5)
+            result = subprocess.run(["docker", "logs", container], capture_output=True, text=True, check=True)
+            assert not re.search(
+                r'"otelcol.component.id": "debug"[^\n]*"log records": [1-9]',
+                result.stdout + result.stderr,
+            ), "unclassified log reached the operational backend route"
 
             runtime = bootstrap(TelemetryConfig(
                 service="collector_canary", version="0.1.0", environment="test",
