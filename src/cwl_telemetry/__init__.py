@@ -21,13 +21,14 @@ _TRACEPARENT = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
 _EVENT = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
 _CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _REFERENCE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_SOURCE_LOCATION = re.compile(r"^[A-Za-z0-9_./-]{1,96}:[1-9][0-9]{0,6}$")
 _ROUTE_TEMPLATE = re.compile(r"^/(?:[A-Za-z0-9._-]+|\{[A-Za-z_][A-Za-z0-9_]*(?::[a-z]+)?\})(?:/(?:[A-Za-z0-9._-]+|\{[A-Za-z_][A-Za-z0-9_]*(?::[a-z]+)?\}))*$|^/$")
 _ATTRIBUTES = frozenset({
     "operation_code", "bounded_context", "tenant_ref", "workspace_ref",
     "principal_ref", "request_id", "event_id", "trace_id", "span_id", "resource_ref",
     "action", "result", "status", "error_type", "error_code",
     "retry_count", "duration_ms", "dependency", "provider",
-    "provenance_ref", "http_route",
+    "provenance_ref", "http_route", "source_location",
 })
 _METRIC_LABELS = frozenset({"operation_code", "bounded_context", "result", "status", "dependency"})
 _CODE_ATTRIBUTES = frozenset({
@@ -160,6 +161,9 @@ def _validate_attributes(attributes: Mapping[str, object], allowed: frozenset[st
         elif key == "http_route":
             if len(value) > 128 or _ROUTE_TEMPLATE.fullmatch(value) is None:
                 raise ValueError("invalid route template")
+        elif key == "source_location":
+            if _SOURCE_LOCATION.fullmatch(value) is None or ".." in value:
+                raise ValueError("invalid source location")
         elif _REFERENCE.fullmatch(value) is None:
             raise ValueError("invalid opaque reference")
         safe[key] = value

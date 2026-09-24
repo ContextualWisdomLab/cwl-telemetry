@@ -45,7 +45,8 @@ def test_event_admission_rejects_raw_secrets_pii_and_unknown_fields() -> None:
     valid = TelemetryEvent(
         name="authentication.denied", severity="WARN", classification="internal",
         purpose_code="security_investigation", kind="security",
-        attributes={"operation_code": "login", "tenant_ref": "t_123", "event_id": "a" * 32},
+        attributes={"operation_code": "login", "tenant_ref": "t_123", "event_id": "a" * 32,
+                    "source_location": "backend/auth.py:42"},
     )
     assert validate_event(valid) is valid
     with pytest.raises(ValueError):
@@ -58,6 +59,7 @@ def test_event_admission_rejects_raw_secrets_pii_and_unknown_fields() -> None:
         {"operation_code": "person@example.com"},
         {"unknown": "value"},
         {"operation_code": "x" * 200},
+        {"source_location": "../../secrets.env:1"},
     ):
         with pytest.raises(ValueError):
             validate_event(TelemetryEvent(

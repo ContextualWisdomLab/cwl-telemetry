@@ -129,7 +129,10 @@ def test_collector_rejects_invalid_tls_auth_type_size_and_payload() -> None:
             for _ in range(30):
                 result = subprocess.run(["docker", "logs", container], capture_output=True, text=True, check=True)
                 logs = (result.stdout + result.stderr).replace(token, "<redacted>")
-                if ('"resource spans": 2' in logs and '"log records": 2' in logs
+                trace_count = sum(int(count) for count in re.findall(
+                    r'"otelcol.signal": "traces"[^\n]*"spans": (\d+)', logs,
+                ))
+                if (trace_count >= 2 and '"log records": 2' in logs
                         and re.search(r'"otelcol.component.id": "debug/security"[^\n]*"log records": 1', logs)
                         and '"data points": 1' in logs):
                     break
