@@ -30,6 +30,7 @@ jobs:
       - run: uv sync --frozen --group dev
       - run: uv run --frozen pytest -q
       - run: uv build
+      - run: tar -tzf dist/*.tar.gz | grep 'collector/production.yaml$' > /dev/null
       - name: Create reviewable draft with exact-source artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -44,7 +45,8 @@ jobs:
             echo 'Version tag already exists' >&2
             exit 1
           fi
-          (cd dist && sha256sum ./*.whl ./*.tar.gz > SHA256SUMS)
-          gh release create "$tag" dist/*.whl dist/*.tar.gz dist/SHA256SUMS \
+          cp collector/production.yaml dist/cwl-otelcol-production.yaml
+          (cd dist && sha256sum ./*.whl ./*.tar.gz ./cwl-otelcol-production.yaml > SHA256SUMS)
+          gh release create "$tag" dist/*.whl dist/*.tar.gz dist/cwl-otelcol-production.yaml dist/SHA256SUMS \
             --draft --target "$GITHUB_SHA" --title "$tag" \
             --notes 'Draft release for independent review. Verify current-head checks, artifact hashes, and consumer migration before publication.'
