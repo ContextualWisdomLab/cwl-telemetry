@@ -302,6 +302,7 @@ class TelemetryRuntime:
     meter: _MeterPort
     logger: _LoggerPort
     _providers: tuple[Any, Any, Any] = field(repr=False)
+    shutdown_failures: int = 0
 
     def emit(self, event: TelemetryEvent) -> None:
         """Emit an admitted structured record."""
@@ -330,7 +331,10 @@ class TelemetryRuntime:
     def shutdown(self) -> None:
         """Flush and close providers at product shutdown."""
         for provider in self._providers:
-            provider.shutdown()
+            try:
+                provider.shutdown()
+            except Exception:
+                self.shutdown_failures += 1
 
 
 def bootstrap(config: TelemetryConfig) -> TelemetryRuntime:

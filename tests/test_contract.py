@@ -281,3 +281,20 @@ def test_bounded_span_queue_reports_saturation_and_recovers(monkeypatch, caplog)
     assert "Queue full, dropping Span" in caplog.text
     assert "recovered" in exported
     assert len(exported) < 81
+
+
+def test_shutdown_closes_other_providers_after_one_exporter_failure() -> None:
+    """Shutdown failure is counted without skipping later provider cleanup."""
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+    ))
+    class FailingProvider:
+        def shutdown(self):
+            raise OSError("synthetic exporter outage")
+
+    remaining = runtime._providers[1:]
+    runtime._providers = (FailingProvider(), *remaining)
+    runtime.shutdown()
+    assert runtime.shutdown_failures == 1
