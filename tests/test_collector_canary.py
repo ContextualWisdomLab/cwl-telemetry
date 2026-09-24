@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+from cwl_telemetry import TelemetryConfig, TelemetryEvent, bootstrap
 
 
 IMAGE = "otel/opentelemetry-collector-contrib@sha256:fd328de2552466ad78385e1b1289c3f2402b1c45f265b252aab1955b42845ac1"
@@ -102,6 +103,30 @@ def test_collector_rejects_invalid_tls_auth_type_size_and_payload() -> None:
                 pass
             else:
                 assert plaintext_status != 200
+
+            runtime = bootstrap(TelemetryConfig(
+                service="collector_canary", version="0.1.0", environment="test",
+                source_revision="a" * 40, receiver=f"https://127.0.0.1:{port}",
+                token=token, ca_file=str(secret_dir / "server.crt"),
+                metric_names={"canary_total"}, operation_codes={"canary"},
+            ))
+            with runtime.tracer.start_as_current_span("canary", {"operation_code": "canary"}):
+                runtime.emit(TelemetryEvent(
+                    name="canary.completed", severity="INFO", classification="internal",
+                    purpose_code="operations", kind="operational",
+                    attributes={"operation_code": "canary"},
+                ))
+                runtime.meter.counter("canary_total").add(1, {"operation_code": "canary"})
+            runtime.shutdown()
+            for _ in range(30):
+                result = subprocess.run(["docker", "logs", container], capture_output=True, text=True, check=True)
+                logs = (result.stdout + result.stderr).replace(token, "<redacted>")
+                if ('"resource spans": 2' in logs and '"log records": 1' in logs
+                        and '"data points": 1' in logs):
+                    break
+                time.sleep(0.1)
+            else:
+                pytest.fail(f"SDK signals not observed at Collector: {logs[-1200:]}")
         finally:
             subprocess.run(["docker", "stop", container], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["docker", "rm", container], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

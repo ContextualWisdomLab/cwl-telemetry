@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
@@ -66,6 +67,7 @@ class TelemetryConfig:
     source_revision: str
     receiver: str | None = None
     token: str | None = field(default=None, repr=False)
+    ca_file: str | None = None
     queue_size: int = 2048
     metric_names: frozenset[str] = frozenset()
     operation_codes: frozenset[str] = frozenset()
@@ -83,8 +85,8 @@ class TelemetryConfig:
         for key in ("metric_names", "operation_codes", "bounded_contexts", "dependencies"):
             object.__setattr__(self, key, _bounded_codes(getattr(self, key), key))
         if self.receiver is None:
-            if self.token is not None:
-                raise ValueError("token requires a receiver")
+            if self.token is not None or self.ca_file is not None:
+                raise ValueError("receiver options require a receiver")
             return
         if not isinstance(self.receiver, str):
             raise ValueError("invalid receiver")
@@ -103,6 +105,8 @@ class TelemetryConfig:
             raise ValueError("invalid receiver")
         if not isinstance(self.token, str) or not 16 <= len(self.token) <= 4096:
             raise ValueError("receiver requires a scoped token")
+        if self.ca_file is not None and (not isinstance(self.ca_file, str) or not Path(self.ca_file).is_file()):
+            raise ValueError("invalid receiver CA file")
 
 
 @dataclass(frozen=True)
@@ -305,6 +309,7 @@ def bootstrap(config: TelemetryConfig) -> TelemetryRuntime:
         readers.append(PeriodicExportingMetricReader(
             OTLPMetricExporter(
                 endpoint=config.receiver.rstrip("/") + "/v1/metrics", headers=headers, timeout=5,
+                certificate_file=config.ca_file,
             ),
             export_interval_millis=60_000,
         ))
@@ -319,6 +324,7 @@ def bootstrap(config: TelemetryConfig) -> TelemetryRuntime:
         tracer_provider.add_span_processor(BatchSpanProcessor(
             OTLPSpanExporter(
                 endpoint=config.receiver.rstrip("/") + "/v1/traces", headers=headers, timeout=5,
+                certificate_file=config.ca_file,
             ),
             max_queue_size=config.queue_size,
             max_export_batch_size=min(128, config.queue_size),
@@ -326,6 +332,7 @@ def bootstrap(config: TelemetryConfig) -> TelemetryRuntime:
         logger_provider.add_log_record_processor(BatchLogRecordProcessor(
             OTLPLogExporter(
                 endpoint=config.receiver.rstrip("/") + "/v1/logs", headers=headers, timeout=5,
+                certificate_file=config.ca_file,
             ),
             max_queue_size=config.queue_size,
             max_export_batch_size=min(128, config.queue_size),
