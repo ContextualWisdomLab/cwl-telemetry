@@ -64,6 +64,9 @@ def make_security_server(
             if self.headers.get("Content-Type") != "application/x-protobuf":
                 self._reply(415)
                 return
+            if self.headers.get("Content-Encoding") not in (None, "identity"):
+                self._reply(415)
+                return
             if self.headers.get("Transfer-Encoding") is not None:
                 self._reply(400)
                 return

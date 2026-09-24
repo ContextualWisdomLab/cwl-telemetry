@@ -59,6 +59,7 @@ exporters:
       storage: file_storage
   otlphttp/security:
     endpoint: ${env:CWL_SECURITY_CONSUMER_OTLP_URL}
+    compression: none
     auth:
       authenticator: bearertokenauth/security
     tls:

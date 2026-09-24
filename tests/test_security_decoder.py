@@ -159,10 +159,13 @@ def test_https_consumer_admits_only_tenant_bound_otlp_and_recovers(tmp_path: Pat
         context = ssl.create_default_context(cafile=str(certificate))
 
         def post(body: bytes, *, token: str | None = "synthetic-consumer-token-12345",
-                 content_type: str = "application/x-protobuf", target: str = url) -> int:
+                 content_type: str = "application/x-protobuf", target: str = url,
+                 content_encoding: str | None = None) -> int:
             headers = {"Content-Type": content_type}
             if token is not None:
                 headers["Authorization"] = f"Bearer {token}"
+            if content_encoding is not None:
+                headers["Content-Encoding"] = content_encoding
             try:
                 with urlopen(Request(target, data=body, headers=headers), context=context, timeout=3) as response:
                     return response.status
@@ -176,6 +179,7 @@ def test_https_consumer_admits_only_tenant_bound_otlp_and_recovers(tmp_path: Pat
         assert post(body, token=None) == 401
         assert post(body, token="wrong-token") == 401
         assert post(body, content_type="text/plain") == 415
+        assert post(body, content_encoding="gzip") == 415
         assert post(b"invalid protobuf") == 400
         assert post(b"x" * 65_537) == 413
         try:

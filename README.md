@@ -61,7 +61,9 @@ HTTPS origin. The receiver creates a private SQLite outbox, admits only the
 credential-bound tenant, and acknowledges an identical retry without storing a
 second record. A reused event ID with different content is rejected. Events
 may arrive up to seven days late to allow Collector recovery; clocks may be
-five minutes ahead. Delivered event IDs remain reserved for that window.
+five minutes ahead. Delivered event IDs remain reserved for that window. The
+security exporter disables its default gzip compression because this receiver
+admits only bounded protobuf bodies without content encoding.
 
 The security operator sends `pending_security_events()` to its approved SIEM
 destination and calls `mark_security_delivered()` only after a positive
@@ -82,8 +84,10 @@ telemetry path.
 
 Run `uv run pytest -q` and `uv build`. The tests use a pinned Collector image
 for TLS, bearer, content-type, size, operational/security routing, and real
-SDK trace/log/metric export. They test malformed schema, stale timestamps,
-tenant mismatch, idempotent retry, conflicting replay, HTTPS admission, and a
+SDK trace/log/metric export. A local failure-injection test persists a security
+record while the consumer is unavailable, restarts the Collector, and confirms
+delivery to the recovered consumer. These tests also cover malformed schema,
+stale timestamps, tenant mismatch, idempotent retry, conflicting replay, HTTPS admission, and a
 persisted pending security event. No live backend or SIEM has been verified.
 Operator-managed retention, persistent-volume deployment, an approved SIEM
 sender, and a released consumer migration remain required before production.

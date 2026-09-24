@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
+import platform
 import re
+import sqlite3
 import ssl
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -16,9 +19,12 @@ from urllib.request import Request, urlopen
 import pytest
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 from cwl_telemetry import TelemetryConfig, TelemetryEvent, bootstrap
+from cwl_telemetry.security import pending_security_events
+from cwl_telemetry.security_consumer import make_security_server
 
 
 IMAGE = "otel/opentelemetry-collector-contrib@sha256:fd328de2552466ad78385e1b1289c3f2402b1c45f265b252aab1955b42845ac1"
+ALPINE = "alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce"
 CONFIG = Path(__file__).parents[1] / "collector" / "canary.yaml"
 PRODUCTION_CONFIG = CONFIG.with_name("production.yaml")
 
@@ -162,3 +168,119 @@ def test_production_collector_requires_persistent_storage_and_validates() -> Non
     finally:
         subprocess.run(["docker", "rm", "-f", container], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["docker", "volume", "rm", volume], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+@pytest.mark.collector
+def test_security_queue_survives_collector_and_consumer_outage() -> None:
+    """A security event crosses the real durable route after both processes restart."""
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        secrets = root / "secrets"
+        secrets.mkdir()
+        token = "synthetic-ingress-token-12345"
+        consumer_token = "synthetic-consumer-token-12345"
+        for name, value in (
+            ("ingress-token", token), ("backend-token", "synthetic-backend-token-12345"),
+            ("security-consumer-token", consumer_token),
+        ):
+            (secrets / name).write_text(value + "\n", encoding="utf-8")
+        _run(
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            "-subj", "/CN=host.docker.internal",
+            "-addext", "subjectAltName=DNS:host.docker.internal,IP:127.0.0.1",
+            "-keyout", str(secrets / "receiver.key"), "-out", str(secrets / "receiver.crt"),
+            "-days", "1",
+        )
+        os.chmod(secrets / "receiver.key", 0o644)  # synthetic key for non-root Collector
+        for name in ("backend-ca.crt", "security-consumer-ca.crt"):
+            (secrets / name).write_bytes((secrets / "receiver.crt").read_bytes())
+
+        outbox = root / "security.sqlite"
+        receiver = make_security_server(
+            ("0.0.0.0", 0), certificate=secrets / "receiver.crt",
+            private_key=secrets / "receiver.key", token_file=secrets / "security-consumer-token",
+            tenant_ref="canary_tenant", outbox=outbox,
+        )
+        consumer_port = receiver.server_port
+        receiver.server_close()  # first export sees a real unavailable consumer
+
+        volume = f"cwl-otel-recovery-{uuid.uuid4().hex}"
+        _run("docker", "volume", "create", volume)
+        container = ""
+        worker = None
+        try:
+            _run(
+                "docker", "run", "--rm", "-u", "0:0", "-v", f"{volume}:/var/lib/otelcol",
+                "--entrypoint", "chown", ALPINE, "10001:10001", "/var/lib/otelcol",
+            )
+            host_mapping = ["--add-host", "host.docker.internal:host-gateway"] if platform.system() == "Linux" else []
+            container = _run(
+                "docker", "create", "-p", "127.0.0.1::4318",
+                "-v", f"{volume}:/var/lib/otelcol", *host_mapping,
+                "-e", "CWL_BACKEND_OTLP_URL=https://backend.invalid",
+                "-e", f"CWL_SECURITY_CONSUMER_OTLP_URL=https://host.docker.internal:{consumer_port}",
+                IMAGE, "--config=/config.yaml",
+            )
+            _run("docker", "cp", str(PRODUCTION_CONFIG), f"{container}:/config.yaml")
+            _run("docker", "cp", str(secrets), f"{container}:/secrets")
+            _run("docker", "start", container)
+            port = _run("docker", "port", container, "4318/tcp").rsplit(":", 1)[-1]
+            context = ssl.create_default_context(cafile=str(secrets / "receiver.crt"))
+            url = f"https://127.0.0.1:{port}/v1/traces"
+            for _ in range(100):
+                try:
+                    if _request(url, ExportTraceServiceRequest().SerializeToString(),
+                                token=token, content_type="application/x-protobuf", context=context) == 200:
+                        break
+                except (OSError, URLError):
+                    pass
+                time.sleep(0.1)
+            else:
+                result = subprocess.run(["docker", "logs", container], capture_output=True, text=True, check=False)
+                logs = (result.stdout + result.stderr).replace(token, "<redacted>").replace(consumer_token, "<redacted>")
+                pytest.fail(f"production Collector did not start: {logs[-1200:]}")
+
+            runtime = bootstrap(TelemetryConfig(
+                service="canary", version="0.1.0", environment="test",
+                source_revision="a" * 40, receiver=f"https://127.0.0.1:{port}",
+                token=token, ca_file=str(secrets / "receiver.crt"),
+            ))
+            runtime.emit(TelemetryEvent(
+                name="authentication.denied", severity="WARN", classification="internal",
+                purpose_code="security_investigation", kind="security",
+                attributes={"tenant_ref": "canary_tenant", "event_id": "d" * 32,
+                            "operation_code": "login"},
+            ))
+            runtime.shutdown()
+            time.sleep(2)
+            _run("docker", "stop", container)
+            _run("docker", "start", container)
+
+            receiver = make_security_server(
+                ("0.0.0.0", consumer_port), certificate=secrets / "receiver.crt",
+                private_key=secrets / "receiver.key", token_file=secrets / "security-consumer-token",
+                tenant_ref="canary_tenant", outbox=outbox,
+            )
+            worker = threading.Thread(target=receiver.serve_forever, daemon=True)
+            worker.start()
+            for _ in range(150):
+                with sqlite3.connect(outbox) as database:
+                    rows = pending_security_events(database)
+                if [row["event_id"] for row in rows] == ["d" * 32]:
+                    break
+                time.sleep(0.2)
+            else:
+                result = subprocess.run(["docker", "logs", container], capture_output=True, text=True, check=False)
+                logs = (result.stdout + result.stderr).replace(token, "<redacted>").replace(consumer_token, "<redacted>")
+                security_logs = "\n".join(line for line in logs.splitlines() if "otlphttp/security" in line)
+                pytest.fail(f"persistent Collector queue did not deliver after recovery: {security_logs[-3000:]}")
+        finally:
+            if worker is not None:
+                receiver.shutdown()
+                receiver.server_close()
+                worker.join(timeout=5)
+            if container:
+                subprocess.run(["docker", "rm", "-f", container], check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["docker", "volume", "rm", volume], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
