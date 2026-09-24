@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 _IDENTITY = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$")
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
+_TRACEPARENT = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
 _EVENT = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
 _CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _REFERENCE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -251,6 +252,26 @@ class TelemetryRuntime:
     def emit(self, event: TelemetryEvent) -> None:
         """Emit an admitted structured record."""
         self.logger.emit(event)
+
+    def extract_trace(self, headers: Mapping[str, str]) -> Any:
+        """Admit only a valid W3C traceparent; discard untrusted baggage."""
+        from opentelemetry.context import Context
+        from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+        parent = headers.get("traceparent") if isinstance(headers, Mapping) else None
+        if not isinstance(parent, str) or _TRACEPARENT.fullmatch(parent) is None:
+            return Context()
+        if int(parent[3:35], 16) == 0 or int(parent[36:52], 16) == 0:
+            return Context()
+        return TraceContextTextMapPropagator().extract({"traceparent": parent})
+
+    def inject_trace(self) -> dict[str, str]:
+        """Return only a W3C traceparent for downstream correlation."""
+        from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+        carrier: dict[str, str] = {}
+        TraceContextTextMapPropagator().inject(carrier)
+        return {"traceparent": carrier["traceparent"]} if "traceparent" in carrier else {}
 
     def shutdown(self) -> None:
         """Flush and close providers at product shutdown."""

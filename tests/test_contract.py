@@ -164,3 +164,41 @@ def test_receiver_rejects_url_control_characters_and_label_sets() -> None:
         TelemetryConfig(**base, metric_names=["same", "same"])
     with pytest.raises(ValueError):
         TelemetryConfig(**base, operation_codes={f"item_{n}" for n in range(129)})
+
+
+def test_w3c_trace_propagation_preserves_identity_without_baggage() -> None:
+    """A remote parent is correlated without copying arbitrary inbound headers."""
+    from opentelemetry.context import attach, detach
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+    ))
+    parent = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+    context = runtime.extract_trace({"traceparent": parent, "baggage": "person@example.com"})
+    token = attach(context)
+    try:
+        with runtime.tracer.start_as_current_span("work"):
+            outbound = runtime.inject_trace()
+    finally:
+        detach(token)
+    assert outbound["traceparent"].split("-")[1] == "a" * 32
+    assert set(outbound) == {"traceparent"}
+    assert runtime.inject_trace() == {}
+    assert runtime.extract_trace({"traceparent": "garbage"}) is not None
+    runtime.shutdown()
+
+
+def test_resource_identity_is_exact_and_private() -> None:
+    """Resource identity uses the caller's exact build/source revision."""
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1.2.3", environment="prod", source_revision="a" * 40,
+    ))
+    resource = runtime._providers[0].resource.attributes
+    assert resource["service.name"] == "svc"
+    assert resource["service.version"] == "1.2.3"
+    assert resource["deployment.environment.name"] == "prod"
+    assert resource["cwl.source_revision"] == "a" * 40
+    runtime.shutdown()
