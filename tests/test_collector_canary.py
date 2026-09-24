@@ -8,6 +8,7 @@ import ssl
 import subprocess
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -19,6 +20,7 @@ from cwl_telemetry import TelemetryConfig, TelemetryEvent, bootstrap
 
 IMAGE = "otel/opentelemetry-collector-contrib@sha256:fd328de2552466ad78385e1b1289c3f2402b1c45f265b252aab1955b42845ac1"
 CONFIG = Path(__file__).parents[1] / "collector" / "canary.yaml"
+PRODUCTION_CONFIG = CONFIG.with_name("production.yaml")
 
 
 def _run(*args: str) -> str:
@@ -137,3 +139,23 @@ def test_collector_rejects_invalid_tls_auth_type_size_and_payload() -> None:
         finally:
             subprocess.run(["docker", "stop", container], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["docker", "rm", container], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+@pytest.mark.collector
+def test_production_collector_requires_persistent_storage_and_validates() -> None:
+    """The pinned Collector accepts the operational/security routing template."""
+    volume = f"cwl-otel-validate-{uuid.uuid4().hex}"
+    container = _run(
+        "docker", "create", "-v", f"{volume}:/var/lib/otelcol",
+        "-e", "CWL_BACKEND_OTLP_URL=https://backend.example",
+        "-e", "CWL_SECURITY_CONSUMER_OTLP_URL=https://security.example",
+        IMAGE, "validate", "--config=/config.yaml",
+    )
+    try:
+        _run("docker", "cp", str(PRODUCTION_CONFIG), f"{container}:/config.yaml")
+        result = subprocess.run(["docker", "start", "-a", container], capture_output=True, text=True, check=False)
+        exit_code = _run("docker", "inspect", container, "--format", "{{.State.ExitCode}}")
+        assert exit_code == "0", (result.stdout + result.stderr)[-1200:]
+    finally:
+        subprocess.run(["docker", "rm", "-f", container], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["docker", "volume", "rm", volume], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
