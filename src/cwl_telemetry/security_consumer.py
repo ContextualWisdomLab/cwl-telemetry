@@ -42,6 +42,8 @@ def make_security_server(
     class Handler(BaseHTTPRequestHandler):
         """Admit fixed-path OTLP logs without recording request contents."""
 
+        timeout = 5
+
         def log_message(self, _format: str, *_args: object) -> None:
             """Suppress standard request-path and header logging."""
 
@@ -53,7 +55,6 @@ def make_security_server(
 
         def do_POST(self) -> None:
             """Validate HTTP admission before decoding an OTLP batch."""
-            self.connection.settimeout(5)
             if self.path != "/v1/logs":
                 self._reply(404)
                 return
@@ -107,7 +108,9 @@ def make_security_server(
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(str(certificate), str(private_key))
-        server.socket = context.wrap_socket(server.socket, server_side=True)
+        server.socket = context.wrap_socket(
+            server.socket, server_side=True, do_handshake_on_connect=False,
+        )
     except Exception:
         server.server_close()
         raise

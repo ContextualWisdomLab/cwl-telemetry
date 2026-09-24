@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import socket
 import ssl
 import subprocess
 import sys
@@ -180,6 +181,14 @@ def test_https_consumer_admits_only_tenant_bound_otlp_and_recovers(tmp_path: Pat
         message = _request()
         message.resource_logs[0].scope_logs[0].log_records[0].time_unix_nano = time.time_ns()
         body = message.SerializeToString()
+        server.RequestHandlerClass.timeout = 1
+        with socket.create_connection(("127.0.0.1", server.server_port), timeout=1):
+            time.sleep(0.05)
+            assert post(body) == 200  # idle unauthenticated TCP peer cannot hold the receiver
+        with socket.create_connection(("127.0.0.1", server.server_port), timeout=1) as raw:
+            with context.wrap_socket(raw, server_hostname="localhost"):
+                time.sleep(0.05)
+                assert post(body) == 200  # completed TLS without HTTP has the same bound
         assert post(body, token=None) == 401
         assert post(body, token="wrong-token") == 401
         assert post(body, content_type="text/plain") == 415
