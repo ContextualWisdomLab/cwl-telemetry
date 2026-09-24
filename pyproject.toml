@@ -21,3 +21,4 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["collector: runs the pinned OpenTelemetry Collector container"]

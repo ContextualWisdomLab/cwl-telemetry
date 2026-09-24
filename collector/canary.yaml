@@ -1,0 +1,46 @@
+# Local contract canary. Bind the published port to 127.0.0.1 only.
+# The token and TLS key are generated outside the repository by the test.
+extensions:
+  bearertokenauth:
+    filename: /otlp_token
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+        max_request_body_size: 65536
+        tls:
+          cert_file: /server.crt
+          key_file: /server.key
+        auth:
+          authenticator: bearertokenauth
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 64
+    spike_limit_mib: 16
+  batch:
+    timeout: 1s
+    send_batch_size: 128
+
+exporters:
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [bearertokenauth]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
