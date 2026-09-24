@@ -160,6 +160,20 @@ def test_metric_and_span_ports_reject_unbounded_attributes() -> None:
     runtime.shutdown()
 
 
+def test_span_context_does_not_record_exception_content() -> None:
+    """A product exception must not become an automatic OTLP event."""
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+    ))
+    with pytest.raises(RuntimeError):
+        with runtime.tracer.start_as_current_span("work") as span:
+            raise RuntimeError("synthetic-secret-in-exception")
+    assert span.events == ()
+    runtime.shutdown()
+
+
 def test_receiver_rejects_url_control_characters_and_label_sets() -> None:
     """Configuration cannot smuggle a different endpoint or unlimited labels."""
     from cwl_telemetry import TelemetryConfig

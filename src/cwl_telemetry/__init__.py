@@ -214,7 +214,9 @@ class _TracerPort:
         """Return an OpenTelemetry span context manager with bounded input."""
         _require_match(name, _CODE, "span name")
         safe = _validate_attributes(attributes or {}, _ATTRIBUTES)
-        return self._tracer.start_as_current_span(name, attributes=safe)
+        return self._tracer.start_as_current_span(
+            name, attributes=safe, record_exception=False, set_status_on_exception=False,
+        )
 
 
 class _MeterPort:
