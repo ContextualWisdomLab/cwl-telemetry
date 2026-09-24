@@ -1,0 +1,91 @@
+# Receiver/router template. Mount TLS material, token files, and a persistent
+# writable /var/lib/otelcol volume; provide HTTPS backend/consumer origins.
+extensions:
+  bearertokenauth/ingress:
+    filename: /secrets/ingress-token
+  bearertokenauth/backend:
+    filename: /secrets/backend-token
+  bearertokenauth/security:
+    filename: /secrets/security-consumer-token
+  file_storage:
+    directory: /var/lib/otelcol
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+        max_request_body_size: 65536
+        tls:
+          cert_file: /secrets/receiver.crt
+          key_file: /secrets/receiver.key
+        auth:
+          authenticator: bearertokenauth/ingress
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  batch:
+    timeout: 1s
+    send_batch_size: 128
+  filter/security:
+    error_mode: propagate
+    log_conditions:
+      - 'log.attributes["cwl.kind"] != "security"'
+      - 'log.attributes["cwl.schema_version"] != "1"'
+
+exporters:
+  otlphttp/backend:
+    endpoint: ${env:CWL_BACKEND_OTLP_URL}
+    auth:
+      authenticator: bearertokenauth/backend
+    tls:
+      ca_file: /secrets/backend-ca.crt
+    timeout: 5s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 0s
+    sending_queue:
+      enabled: true
+      queue_size: 1000
+      storage: file_storage
+  otlphttp/security:
+    endpoint: ${env:CWL_SECURITY_CONSUMER_OTLP_URL}
+    auth:
+      authenticator: bearertokenauth/security
+    tls:
+      ca_file: /secrets/security-consumer-ca.crt
+    timeout: 5s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 0s
+    sending_queue:
+      enabled: true
+      queue_size: 1000
+      storage: file_storage
+
+service:
+  extensions: [bearertokenauth/ingress, bearertokenauth/backend, bearertokenauth/security, file_storage]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/backend]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/backend]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/backend]
+    logs/security:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/security, batch]
+      exporters: [otlphttp/security]

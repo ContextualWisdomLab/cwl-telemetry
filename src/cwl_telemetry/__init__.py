@@ -22,7 +22,7 @@ _CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _REFERENCE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _ATTRIBUTES = frozenset({
     "operation_code", "bounded_context", "tenant_ref", "workspace_ref",
-    "principal_ref", "request_id", "trace_id", "span_id", "resource_ref",
+    "principal_ref", "request_id", "event_id", "trace_id", "span_id", "resource_ref",
     "action", "result", "status", "error_type", "error_code",
     "retry_count", "duration_ms", "dependency", "provider",
     "provenance_ref",
@@ -32,11 +32,17 @@ _CODE_ATTRIBUTES = frozenset({
     "operation_code", "bounded_context", "action", "result", "status",
     "error_type", "error_code", "dependency", "provider",
 })
-_HEX_IDENTITIES = {"request_id": 32, "trace_id": 32, "span_id": 16}
+_HEX_IDENTITIES = {"request_id": 32, "event_id": 32, "trace_id": 32, "span_id": 16}
 _CLASSIFICATIONS = frozenset({"public", "internal", "confidential", "restricted"})
 _PURPOSES = frozenset({"operations", "performance", "reliability", "security_investigation"})
 _SEVERITIES = frozenset({"DEBUG", "INFO", "WARN", "ERROR"})
 _METRIC_OUTCOMES = frozenset({"success", "failure", "timeout", "cancelled", "unknown"})
+_SECURITY_EVENTS = frozenset({
+    "authentication.denied", "privilege.changed", "secret.accessed", "policy.decided",
+    "malware.detected", "sandbox.failed", "egress.suspicious", "integrity.violated",
+    "audit.failed", "administration.high_risk", "tenant_boundary.violated",
+    "data.exported", "key.rotated", "security_control.tested",
+})
 
 
 def _require_match(value: str, pattern: re.Pattern[str], field_name: str) -> None:
@@ -160,6 +166,10 @@ def validate_event(event: TelemetryEvent) -> TelemetryEvent:
         raise ValueError("invalid signal kind")
     if event.kind == "security" and event.purpose_code != "security_investigation":
         raise ValueError("security signals require security purpose")
+    if event.kind == "security" and event.name not in _SECURITY_EVENTS:
+        raise ValueError("undeclared security event")
+    if event.kind == "security" and not {"event_id", "tenant_ref"} <= event.attributes.keys():
+        raise ValueError("security event requires stable identity and tenant")
     _validate_attributes(event.attributes, _ATTRIBUTES)
     return event
 

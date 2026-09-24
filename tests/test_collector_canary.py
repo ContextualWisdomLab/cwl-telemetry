@@ -120,7 +120,7 @@ def test_collector_rejects_invalid_tls_auth_type_size_and_payload() -> None:
                 runtime.emit(TelemetryEvent(
                     name="authentication.denied", severity="WARN", classification="internal",
                     purpose_code="security_investigation", kind="security",
-                    attributes={"operation_code": "canary"},
+                    attributes={"operation_code": "canary", "tenant_ref": "canary_tenant", "event_id": "a" * 32},
                 ))
                 runtime.meter.counter("canary_total").add(1, {"operation_code": "canary"})
             runtime.shutdown()

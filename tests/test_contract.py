@@ -43,11 +43,16 @@ def test_event_admission_rejects_raw_secrets_pii_and_unknown_fields() -> None:
     from cwl_telemetry import TelemetryEvent, validate_event
 
     valid = TelemetryEvent(
-        name="request.denied", severity="WARN", classification="internal",
+        name="authentication.denied", severity="WARN", classification="internal",
         purpose_code="security_investigation", kind="security",
-        attributes={"operation_code": "login", "tenant_ref": "t_123"},
+        attributes={"operation_code": "login", "tenant_ref": "t_123", "event_id": "a" * 32},
     )
     assert validate_event(valid) is valid
+    with pytest.raises(ValueError):
+        validate_event(TelemetryEvent(
+            name="debug.dump", severity="WARN", classification="internal",
+            purpose_code="security_investigation", kind="security",
+        ))
     for attributes in (
         {"Authorization": "Bearer secret"},
         {"operation_code": "person@example.com"},
@@ -56,9 +61,9 @@ def test_event_admission_rejects_raw_secrets_pii_and_unknown_fields() -> None:
     ):
         with pytest.raises(ValueError):
             validate_event(TelemetryEvent(
-                name="request.denied", severity="WARN", classification="internal",
+                name="authentication.denied", severity="WARN", classification="internal",
                 purpose_code="security_investigation", kind="security",
-                attributes=attributes,
+                attributes={"tenant_ref": "t_123", "event_id": "a" * 32, **attributes},
             ))
 
 
