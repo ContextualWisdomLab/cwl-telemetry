@@ -106,3 +106,11 @@ stale timestamps, tenant mismatch, idempotent retry, conflicting replay, HTTPS a
 persisted pending security event. No live backend or SIEM has been verified.
 Operator-managed retention, persistent-volume deployment, an approved SIEM
 sender, and a released consumer migration remain required before production.
+
+After the runtime PR is merged and its exact main head has passed required
+checks and independent review, dispatch `Prepare telemetry release` on `main`.
+It reruns the contract tests, builds the wheel and source distribution, records
+their SHA-256 digests, and creates a **draft** GitHub release at that exact
+commit. Review the draft assets and hashes before publishing it. A product
+image must install the published wheel by immutable URL and SHA-256; a VCS pin
+in a development lock file does not make the image telemetry-enabled.
