@@ -12,6 +12,7 @@ import stat
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+from . import _valid_bearer_token
 from .security import decode_security_export
 
 
@@ -23,7 +24,7 @@ def make_security_server(
     if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", tenant_ref) is None:
         raise ValueError("invalid tenant reference")
     token = token_file.read_text(encoding="utf-8").rstrip("\n")
-    if not 16 <= len(token) <= 4096 or any(character.isspace() for character in token):
+    if not _valid_bearer_token(token):
         raise ValueError("invalid receiver token")
     if not outbox.parent.is_dir():
         raise ValueError("outbox directory must exist")

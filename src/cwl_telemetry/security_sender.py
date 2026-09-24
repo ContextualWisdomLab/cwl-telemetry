@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
+from . import _valid_bearer_token
 from .security import mark_security_delivered, pending_security_events
 
 
@@ -51,7 +52,7 @@ def deliver_pending(
 ) -> int:
     """Mark each record only after the gateway acknowledges its exact event ID."""
     target = _gateway_url(gateway)
-    if not isinstance(token, str) or not 16 <= len(token) <= 4096 or any(char.isspace() for char in token):
+    if not _valid_bearer_token(token):
         raise ValueError("invalid SIEM gateway token")
     if type(limit) is not int or not 1 <= limit <= 1000:
         raise ValueError("invalid delivery batch size")

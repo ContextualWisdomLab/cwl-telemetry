@@ -153,6 +153,13 @@ def test_https_consumer_admits_only_tenant_bound_otlp_and_recovers(tmp_path: Pat
     token_file = tmp_path / "token"
     token_file.write_text("synthetic-consumer-token-12345\n")
     outbox = tmp_path / "outbox.sqlite"
+    token_file.write_text("a" * 16 + "\x7f")
+    with pytest.raises(ValueError, match="token"):
+        make_security_server(
+            ("127.0.0.1", 0), certificate=certificate, private_key=private_key,
+            token_file=token_file, tenant_ref="tenant_1", outbox=outbox,
+        )
+    token_file.write_text("synthetic-consumer-token-12345\n")
     server = make_security_server(
         ("127.0.0.1", 0), certificate=certificate, private_key=private_key,
         token_file=token_file, tenant_ref="tenant_1", outbox=outbox, max_pending=1,
@@ -296,6 +303,8 @@ def test_siem_handoff_keeps_outbox_pending_until_exact_https_ack(tmp_path: Path)
         assert token not in rejected_cli.stderr
         with pytest.raises(ValueError, match="origin"):
             deliver_pending(outbox, gateway="http://127.0.0.1", token=token)
+        with pytest.raises(ValueError, match="token"):
+            deliver_pending(outbox, gateway=gateway, token=token + "\r\nInjected: x")
         with pytest.raises(HTTPError):
             deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate)
         mode["value"] = "wrong_ack"

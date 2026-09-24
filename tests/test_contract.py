@@ -36,6 +36,12 @@ def test_config_requires_identity_and_secure_receiver() -> None:
             service="svc", version="1", environment="dev", source_revision="a" * 40,
             receiver="http://collector.example:4318",
         )
+    for malformed in ("a" * 16 + "\r\nInjected: x", "a" * 16 + "\x7f", "a" * 16 + "é"):
+        with pytest.raises(ValueError, match="token"):
+            TelemetryConfig(
+                service="svc", version="1", environment="dev", source_revision="a" * 40,
+                receiver="https://collector.example:4318", token=malformed,
+            )
 
 
 def test_event_admission_rejects_raw_secrets_pii_and_unknown_fields() -> None:

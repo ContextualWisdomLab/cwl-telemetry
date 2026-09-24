@@ -67,6 +67,10 @@ def _bounded_codes(values: object, field_name: str) -> frozenset[str]:
     return result
 
 
+def _valid_bearer_token(token: object) -> bool:
+    return isinstance(token, str) and 16 <= len(token) <= 4096 and all(33 <= ord(char) <= 126 for char in token)
+
+
 @dataclass(frozen=True)
 class TelemetryConfig:
     """Explicit product identity and optional authenticated OTLP receiver."""
@@ -123,7 +127,7 @@ class TelemetryConfig:
             or parsed.path not in ("", "/")
         ):
             raise ValueError("invalid receiver")
-        if not isinstance(self.token, str) or not 16 <= len(self.token) <= 4096:
+        if not _valid_bearer_token(self.token):
             raise ValueError("receiver requires a scoped token")
         if self.ca_file is not None and (not isinstance(self.ca_file, str) or not Path(self.ca_file).is_file()):
             raise ValueError("invalid receiver CA file")
