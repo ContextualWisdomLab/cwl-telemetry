@@ -147,6 +147,59 @@ def test_receiver_outage_keeps_transaction_and_credentials_private(caplog) -> No
     assert token not in caplog.text
 
 
+def test_temporary_receiver_failure_retries_without_blocking_product_work(monkeypatch) -> None:
+    """A retryable receiver response is delivered after backoff, outside product work."""
+    from requests import Response, Session
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    attempts: list[tuple[str, str | None]] = []
+
+    def post(session, url, **_kwargs):
+        attempts.append((url, session.headers.get("Authorization")))
+        response = Response()
+        response.status_code = 503 if len(attempts) == 1 else 200
+        response.reason = "temporary outage" if response.status_code == 503 else "OK"
+        return response
+
+    monkeypatch.setattr(Session, "post", post)
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+        receiver="https://collector.example", token="synthetic-token-12345", queue_size=16,
+    ))
+    with runtime.tracer.start_as_current_span("work"):
+        assert 2 + 2 == 4
+    assert runtime._providers[0].force_flush(timeout_millis=5_000)
+    runtime.shutdown()
+    assert attempts == [
+        ("https://collector.example/v1/traces", "Bearer synthetic-token-12345"),
+        ("https://collector.example/v1/traces", "Bearer synthetic-token-12345"),
+    ]
+
+
+def test_receiver_timeout_drops_without_failing_product_work(monkeypatch) -> None:
+    """A receiver timeout is bounded and cannot turn product work into failure."""
+    from requests import Session
+    from requests.exceptions import Timeout
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    attempts: list[str] = []
+
+    def post(_session, url, **_kwargs):
+        attempts.append(url)
+        raise Timeout("synthetic receiver timeout")
+
+    monkeypatch.setattr(Session, "post", post)
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+        receiver="https://collector.example", token="synthetic-token-12345", queue_size=16,
+    ))
+    with runtime.tracer.start_as_current_span("work"):
+        assert 2 + 2 == 4
+    assert runtime._providers[0].force_flush(timeout_millis=5_000)
+    runtime.shutdown()
+    assert attempts and set(attempts) == {"https://collector.example/v1/traces"}
+
+
 def test_metric_and_span_ports_reject_unbounded_attributes() -> None:
     """Product code cannot add arbitrary span content or metric labels."""
     from cwl_telemetry import TelemetryConfig, bootstrap
