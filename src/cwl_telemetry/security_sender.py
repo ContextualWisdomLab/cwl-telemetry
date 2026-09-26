@@ -83,7 +83,7 @@ def deliver_pending(
             try:
                 with opener.open(request, timeout=5) as response:
                     body = response.read(1025)
-                    if (response.status != 200 or response.headers.get("Content-Type") != "application/json"
+                    if (response.status != 200 or response.headers.get_all("Content-Type") != ["application/json"]
                             or len(body) > 1024):
                         raise ValueError("invalid SIEM acknowledgement")
             except HTTPError as error:

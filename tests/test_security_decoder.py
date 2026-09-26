@@ -345,6 +345,8 @@ def test_siem_handoff_keeps_outbox_pending_until_exact_https_ack(tmp_path: Path)
                 response = response[:-1] + f', "event_id": "{event_id}"}}'.encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
+            if mode["value"] == "duplicate_content_type":
+                self.send_header("Content-Type", "text/plain")
             self.send_header("Content-Length", str(len(response)))
             self.end_headers()
             self.wfile.write(response)
@@ -375,6 +377,9 @@ def test_siem_handoff_keeps_outbox_pending_until_exact_https_ack(tmp_path: Path)
         with pytest.raises(ValueError, match="acknowledgement"):
             deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate)
         mode["value"] = "duplicate_ack"
+        with pytest.raises(ValueError, match="acknowledgement"):
+            deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate)
+        mode["value"] = "duplicate_content_type"
         with pytest.raises(ValueError, match="acknowledgement"):
             deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate)
         mode["value"] = "redirect"
