@@ -10,6 +10,7 @@ import ssl
 import stat
 import sys
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
@@ -79,11 +80,15 @@ def deliver_pending(
                     "Idempotency-Key": event_id,
                 }, method="POST",
             )
-            with opener.open(request, timeout=5) as response:
-                body = response.read(1025)
-                if (response.status != 200 or response.headers.get("Content-Type") != "application/json"
-                        or len(body) > 1024):
-                    raise ValueError("invalid SIEM acknowledgement")
+            try:
+                with opener.open(request, timeout=5) as response:
+                    body = response.read(1025)
+                    if (response.status != 200 or response.headers.get("Content-Type") != "application/json"
+                            or len(body) > 1024):
+                        raise ValueError("invalid SIEM acknowledgement")
+            except HTTPError as error:
+                error.close()
+                raise
             try:
                 acknowledgement = json.loads(body, object_pairs_hook=_ack_fields)
             except (UnicodeDecodeError, json.JSONDecodeError) as error:

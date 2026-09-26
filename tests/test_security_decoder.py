@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import json
+from http.client import HTTPSConnection
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -232,7 +233,18 @@ def test_https_consumer_admits_only_tenant_bound_otlp_and_recovers(tmp_path: Pat
         assert post(body, content_type="text/plain") == 415
         assert post(body, content_encoding="gzip") == 415
         assert post(b"invalid protobuf") == 400
-        assert post(b"x" * 65_537) == 413
+        oversized = HTTPSConnection("127.0.0.1", server.server_port, context=context, timeout=3)
+        try:
+            oversized.putrequest("POST", "/v1/logs")
+            oversized.putheader("Authorization", "Bearer synthetic-consumer-token-12345")
+            oversized.putheader("Content-Type", "application/x-protobuf")
+            oversized.putheader("Content-Length", "65537")
+            oversized.endheaders()
+            response = oversized.getresponse()
+            assert response.status == 413
+            response.close()
+        finally:
+            oversized.close()
         try:
             assert post(body, target=url.replace("https:", "http:")) != 200
         except (OSError, URLError):
@@ -336,8 +348,9 @@ def test_siem_handoff_keeps_outbox_pending_until_exact_https_ack(tmp_path: Path)
             deliver_pending(outbox, gateway="http://127.0.0.1", token=token)
         with pytest.raises(ValueError, match="token"):
             deliver_pending(outbox, gateway=gateway, token=token + "\r\nInjected: x")
-        with pytest.raises(HTTPError):
+        with pytest.raises(HTTPError) as outage:
             deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate)
+        assert outage.value.fp is None or outage.value.fp.closed
         mode["value"] = "wrong_ack"
         with pytest.raises(ValueError, match="acknowledgement"):
             deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate)
@@ -345,8 +358,9 @@ def test_siem_handoff_keeps_outbox_pending_until_exact_https_ack(tmp_path: Path)
         with pytest.raises(ValueError, match="acknowledgement"):
             deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate)
         mode["value"] = "redirect"
-        with pytest.raises(HTTPError):
+        with pytest.raises(HTTPError) as redirect:
             deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate)
+        assert redirect.value.fp is None or redirect.value.fp.closed
         with sqlite3.connect(outbox) as connection:
             assert [row["event_id"] for row in pending_security_events(connection)] == ["b" * 32]
         mode["value"] = "ready"
