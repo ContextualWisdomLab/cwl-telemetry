@@ -1,5 +1,7 @@
 # CWL Telemetry
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ContextualWisdomLab/cwl-telemetry)
+
 Shared runtime telemetry dependency for ContextualWisdomLab products. Importing
 the package is inert. Applications call `bootstrap()` to opt in. This is an
 unreleased draft for [CWL issue #1565](https://github.com/ContextualWisdomLab/.github/issues/1565).
