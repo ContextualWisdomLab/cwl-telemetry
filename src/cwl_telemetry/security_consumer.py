@@ -4,16 +4,36 @@ from __future__ import annotations
 
 import argparse
 import hmac
+import io
 import os
 import re
 import sqlite3
 import ssl
 import stat
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from . import _valid_bearer_token
 from .security import decode_security_export
+
+
+class _DeadlineReader(io.RawIOBase):
+    """Bound every socket read by one deadline for the whole request."""
+
+    def __init__(self, connection: ssl.SSLSocket, deadline: float) -> None:
+        self.connection = connection
+        self.deadline = deadline
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: memoryview) -> int:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("request deadline exceeded")
+        self.connection.settimeout(remaining)
+        return self.connection.recv_into(buffer)
 
 
 def make_security_server(
@@ -44,6 +64,12 @@ def make_security_server(
         """Admit fixed-path OTLP logs without recording request contents."""
 
         timeout = 5
+
+        def setup(self) -> None:
+            deadline = time.monotonic() + self.timeout
+            super().setup()
+            self.rfile.close()
+            self.rfile = io.BufferedReader(_DeadlineReader(self.connection, deadline))
 
         def log_message(self, _format: str, *_args: object) -> None:
             """Suppress standard request-path and header logging."""

@@ -172,14 +172,14 @@ def test_https_consumer_admits_only_tenant_bound_otlp_and_recovers(tmp_path: Pat
 
         def post(body: bytes, *, token: str | None = "synthetic-consumer-token-12345",
                  content_type: str = "application/x-protobuf", target: str = url,
-                 content_encoding: str | None = None) -> int:
+                 content_encoding: str | None = None, timeout: float = 3) -> int:
             headers = {"Content-Type": content_type}
             if token is not None:
                 headers["Authorization"] = f"Bearer {token}"
             if content_encoding is not None:
                 headers["Content-Encoding"] = content_encoding
             try:
-                with urlopen(Request(target, data=body, headers=headers), context=context, timeout=3) as response:
+                with urlopen(Request(target, data=body, headers=headers), context=context, timeout=timeout) as response:
                     return response.status
             except HTTPError as error:
                 error.close()
@@ -196,6 +196,37 @@ def test_https_consumer_admits_only_tenant_bound_otlp_and_recovers(tmp_path: Pat
             with context.wrap_socket(raw, server_hostname="localhost"):
                 time.sleep(0.05)
                 assert post(body) == 200  # completed TLS without HTTP has the same bound
+
+        def assert_trickle_cannot_block(prefix: bytes) -> None:
+            server.RequestHandlerClass.timeout = 0.4
+            with socket.create_connection(("127.0.0.1", server.server_port), timeout=1) as raw:
+                with context.wrap_socket(raw, server_hostname="localhost") as peer:
+                    peer.sendall(prefix)
+                    stop = threading.Event()
+
+                    def trickle() -> None:
+                        while not stop.wait(0.08):
+                            try:
+                                peer.sendall(b"x")
+                            except OSError:
+                                return
+
+                    attacker = threading.Thread(target=trickle, daemon=True)
+                    attacker.start()
+                    try:
+                        assert post(body, timeout=2) == 200
+                    finally:
+                        stop.set()
+                        attacker.join(timeout=2)
+
+        assert_trickle_cannot_block(b"POST /v1/logs HTTP/1.1\r\nX-Test: ")
+        assert_trickle_cannot_block(
+            b"POST /v1/logs HTTP/1.1\r\n"
+            b"Authorization: Bearer synthetic-consumer-token-12345\r\n"
+            b"Content-Type: application/x-protobuf\r\n"
+            + f"Content-Length: {len(body)}\r\n\r\n".encode() + body[:1]
+        )
+        server.RequestHandlerClass.timeout = 1
         assert post(body, token=None) == 401
         assert post(body, token="wrong-token") == 401
         assert post(body, content_type="text/plain") == 415
