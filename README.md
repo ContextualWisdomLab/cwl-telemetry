@@ -97,7 +97,17 @@ telemetry path.
 
 ## Verification and release boundary
 
-Run `uv run pytest -q` and `uv build`. The tests use a pinned Collector image
+Run the locked release checks:
+
+```sh
+uv sync --locked --group dev --no-install-project
+uv sync --locked --group dev --no-build-isolation
+uv run --no-sync pytest -q
+uv build --no-build-isolation
+```
+
+The locked dev group supplies the exact build backend before the package is
+built. The tests use a pinned Collector image
 for TLS, bearer, content-type, size, operational/security routing, and real
 SDK trace/log/metric export. A local failure-injection test persists a security
 record while the consumer is unavailable, restarts the Collector, and confirms
