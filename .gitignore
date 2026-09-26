@@ -1,0 +1,8 @@
+.venv/
+.codegraph/
+.pytest_cache/
+.coverage
+*.egg-info/
+__pycache__/
+dist/
+graphify-out/

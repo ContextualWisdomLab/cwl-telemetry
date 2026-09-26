@@ -1,0 +1,410 @@
+"""Explicit, bounded telemetry Ports for CWL products.
+
+Importing this module cannot create providers, threads, or network traffic.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, ContextManager, Iterator, Mapping
+from urllib.parse import urlsplit
+
+
+_IDENTITY = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
+_VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$")
+_REVISION = re.compile(r"^[0-9a-f]{40}$")
+_TRACEPARENT = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
+_EVENT = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
+_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_REFERENCE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_SOURCE_LOCATION = re.compile(r"^[A-Za-z0-9_./-]{1,96}:[1-9][0-9]{0,6}$")
+_ROUTE_TEMPLATE = re.compile(r"^/(?:[A-Za-z0-9._-]+|\{[A-Za-z_][A-Za-z0-9_]*(?::[a-z]+)?\})(?:/(?:[A-Za-z0-9._-]+|\{[A-Za-z_][A-Za-z0-9_]*(?::[a-z]+)?\}))*$|^/$")
+_ATTRIBUTES = frozenset({
+    "operation_code", "bounded_context", "tenant_ref", "workspace_ref",
+    "principal_ref", "request_id", "event_id", "trace_id", "span_id", "resource_ref",
+    "action", "result", "status", "error_type", "error_code",
+    "retry_count", "duration_ms", "dependency", "provider",
+    "provenance_ref", "http_route", "source_location",
+})
+_METRIC_LABELS = frozenset({"operation_code", "bounded_context", "result", "status", "dependency"})
+_CODE_ATTRIBUTES = frozenset({
+    "operation_code", "bounded_context", "action", "result", "status",
+    "error_type", "error_code", "dependency", "provider",
+})
+_HEX_IDENTITIES = {"request_id": 32, "event_id": 32, "trace_id": 32, "span_id": 16}
+_CLASSIFICATIONS = frozenset({"public", "internal", "confidential", "restricted"})
+_PURPOSES = frozenset({"operations", "performance", "reliability", "security_investigation"})
+_SEVERITIES = frozenset({"DEBUG", "INFO", "WARN", "ERROR"})
+_METRIC_OUTCOMES = frozenset({"success", "failure", "timeout", "cancelled", "unknown"})
+_SECURITY_EVENTS = frozenset({
+    "authentication.denied", "privilege.changed", "secret.accessed", "policy.decided",
+    "malware.detected", "sandbox.failed", "egress.suspicious", "integrity.violated",
+    "audit.failed", "administration.high_risk", "tenant_boundary.violated",
+    "data.exported", "key.rotated", "security_control.tested",
+})
+
+
+def _require_match(value: str, pattern: re.Pattern[str], field_name: str) -> None:
+    """Reject unbounded or ambiguous identity and code fields."""
+    if not isinstance(value, str) or pattern.fullmatch(value) is None:
+        raise ValueError(f"invalid {field_name}")
+
+
+def _bounded_codes(values: object, field_name: str) -> frozenset[str]:
+    """Freeze a finite product-declared label vocabulary."""
+    if not isinstance(values, (set, frozenset, tuple, list)) or len(values) > 128:
+        raise ValueError(f"invalid {field_name}")
+    result = frozenset(values)
+    if len(result) != len(values):
+        raise ValueError(f"duplicate {field_name}")
+    for value in result:
+        _require_match(value, _CODE, field_name)
+    return result
+
+
+def _valid_bearer_token(token: object) -> bool:
+    return isinstance(token, str) and 16 <= len(token) <= 4096 and all(33 <= ord(char) <= 126 for char in token)
+
+
+@dataclass(frozen=True)
+class TelemetryConfig:
+    """Explicit product identity and optional authenticated OTLP receiver."""
+
+    service: str
+    version: str
+    environment: str
+    source_revision: str
+    receiver: str | None = None
+    token: str | None = field(default=None, repr=False)
+    ca_file: str | None = None
+    queue_size: int = 2048
+    metric_names: frozenset[str] = frozenset()
+    operation_codes: frozenset[str] = frozenset()
+    bounded_contexts: frozenset[str] = frozenset()
+    dependencies: frozenset[str] = frozenset()
+    route_templates: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        """Validate configuration before any provider or exporter exists."""
+        for key in ("service", "environment"):
+            _require_match(getattr(self, key), _IDENTITY, key)
+        _require_match(self.version, _VERSION, "version")
+        _require_match(self.source_revision, _REVISION, "source_revision")
+        if not isinstance(self.queue_size, int) or not 16 <= self.queue_size <= 10_000:
+            raise ValueError("invalid queue_size")
+        for key in ("metric_names", "operation_codes", "bounded_contexts", "dependencies"):
+            object.__setattr__(self, key, _bounded_codes(getattr(self, key), key))
+        if not isinstance(self.route_templates, (set, frozenset, tuple, list)) or len(self.route_templates) > 256:
+            raise ValueError("invalid route templates")
+        routes = frozenset(self.route_templates)
+        if len(routes) != len(self.route_templates):
+            raise ValueError("duplicate route template")
+        for route in routes:
+            if not isinstance(route, str) or len(route) > 128 or _ROUTE_TEMPLATE.fullmatch(route) is None:
+                raise ValueError("invalid route template")
+        object.__setattr__(self, "route_templates", routes)
+        if self.receiver is None:
+            if self.token is not None or self.ca_file is not None:
+                raise ValueError("receiver options require a receiver")
+            return
+        if not isinstance(self.receiver, str):
+            raise ValueError("invalid receiver")
+        parsed = urlsplit(self.receiver)
+        try:
+            valid_port = parsed.port is None or 1 <= parsed.port <= 65535
+        except ValueError:
+            valid_port = False
+        if (
+            any(ord(character) <= 32 for character in self.receiver)
+            or
+            parsed.scheme != "https" or not parsed.hostname or not valid_port
+            or parsed.username or parsed.password or parsed.query or parsed.fragment
+            or parsed.path not in ("", "/")
+        ):
+            raise ValueError("invalid receiver")
+        if not _valid_bearer_token(self.token):
+            raise ValueError("receiver requires a scoped token")
+        if self.ca_file is not None and (not isinstance(self.ca_file, str) or not Path(self.ca_file).is_file()):
+            raise ValueError("invalid receiver CA file")
+
+
+@dataclass(frozen=True)
+class TelemetryEvent:
+    """A structured signal whose fields must pass admission before export."""
+
+    name: str
+    severity: str
+    classification: str
+    purpose_code: str
+    kind: str
+    attributes: Mapping[str, str | int | float | bool] = field(default_factory=dict)
+
+
+def _validate_attributes(attributes: Mapping[str, object], allowed: frozenset[str]) -> dict[str, object]:
+    """Return a safe copy of bounded structured attributes."""
+    if not isinstance(attributes, Mapping) or len(attributes) > 24:
+        raise ValueError("invalid attributes")
+    safe: dict[str, object] = {}
+    for key, value in attributes.items():
+        if key not in allowed:
+            raise ValueError("unknown telemetry attribute")
+        if key in ("retry_count", "duration_ms"):
+            if (type(value) not in (int, float) or not 0 <= value <= 1_000_000_000
+                    or (type(value) is float and not math.isfinite(value))):
+                raise ValueError("invalid numeric telemetry attribute")
+        elif type(value) is not str:
+            raise ValueError("invalid telemetry attribute")
+        elif key in _HEX_IDENTITIES:
+            if re.fullmatch(rf"[0-9a-f]{{{_HEX_IDENTITIES[key]}}}", value) is None:
+                raise ValueError("invalid correlation reference")
+        elif key in _CODE_ATTRIBUTES:
+            _require_match(value, _CODE, key)
+        elif key == "http_route":
+            if len(value) > 128 or _ROUTE_TEMPLATE.fullmatch(value) is None:
+                raise ValueError("invalid route template")
+        elif key == "source_location":
+            if _SOURCE_LOCATION.fullmatch(value) is None or ".." in value:
+                raise ValueError("invalid source location")
+        elif _REFERENCE.fullmatch(value) is None:
+            raise ValueError("invalid opaque reference")
+        safe[key] = value
+    return safe
+
+
+def validate_event(event: TelemetryEvent) -> TelemetryEvent:
+    """Reject unknown, unbounded, or sensitive event content before export."""
+    if not isinstance(event, TelemetryEvent):
+        raise ValueError("invalid telemetry event")
+    _require_match(event.name, _EVENT, "event name")
+    if event.severity not in _SEVERITIES:
+        raise ValueError("invalid severity")
+    if event.classification not in _CLASSIFICATIONS:
+        raise ValueError("invalid classification")
+    if event.purpose_code not in _PURPOSES:
+        raise ValueError("invalid purpose")
+    if event.kind not in ("operational", "security"):
+        raise ValueError("invalid signal kind")
+    if event.kind == "security" and event.purpose_code != "security_investigation":
+        raise ValueError("security signals require security purpose")
+    if event.kind == "security" and event.name not in _SECURITY_EVENTS:
+        raise ValueError("undeclared security event")
+    if event.kind == "security" and not {"event_id", "tenant_ref"} <= event.attributes.keys():
+        raise ValueError("security event requires stable identity and tenant")
+    _validate_attributes(event.attributes, _ATTRIBUTES)
+    return event
+
+
+class _LoggerPort:
+    """Admit structured records without exposing the raw OTel logger."""
+
+    def __init__(self, otel_logger: Any) -> None:
+        self._logger = otel_logger
+        self.dropped = 0
+
+    def emit(self, event: TelemetryEvent) -> None:
+        """Never fail product work for an ordinary export-path error."""
+        validate_event(event)
+        from opentelemetry._logs import SeverityNumber
+
+        try:
+            self._logger.emit(
+                timestamp=time.time_ns(),
+                severity_number=getattr(SeverityNumber, event.severity),
+                severity_text=event.severity,
+                body=event.name,
+                event_name=event.name,
+                attributes={
+                    **_validate_attributes(event.attributes, _ATTRIBUTES),
+                    "cwl.classification": event.classification,
+                    "cwl.purpose_code": event.purpose_code,
+                    "cwl.kind": event.kind,
+                    "cwl.schema_version": "1",
+                },
+            )
+        except Exception:
+            self.dropped += 1
+
+
+class _SpanPort:
+    """Expose only bounded span attributes to product code."""
+
+    def __init__(self, span: Any, config: TelemetryConfig) -> None:
+        self._span = span
+        self._config = config
+
+    def set_attribute(self, key: str, value: object) -> None:
+        """Set an admitted attribute; route templates must be declared."""
+        safe = _validate_attributes({key: value}, _ATTRIBUTES)
+        if key == "http_route" and value not in self._config.route_templates:
+            raise ValueError("undeclared route template")
+        self._span.set_attribute(key, safe[key])
+
+
+class _TracerPort:
+    """Start spans only with admitted names and attributes."""
+
+    def __init__(self, tracer: Any, config: TelemetryConfig) -> None:
+        self._tracer = tracer
+        self._config = config
+
+    def start_as_current_span(self, name: str, attributes: Mapping[str, object] | None = None) -> ContextManager[_SpanPort]:
+        """Return an OpenTelemetry span context manager with bounded input."""
+        _require_match(name, _CODE, "span name")
+        safe = _validate_attributes(attributes or {}, _ATTRIBUTES)
+        if "http_route" in safe and safe["http_route"] not in self._config.route_templates:
+            raise ValueError("undeclared route template")
+        @contextmanager
+        def current_span() -> Iterator[_SpanPort]:
+            with self._tracer.start_as_current_span(
+                name, attributes=safe, record_exception=False, set_status_on_exception=False,
+            ) as span:
+                yield _SpanPort(span, self._config)
+
+        return current_span()
+
+
+class _MeterPort:
+    """Create counters whose labels have bounded cardinality."""
+
+    def __init__(self, meter: Any, config: TelemetryConfig) -> None:
+        self._meter = meter
+        self._config = config
+
+    def counter(self, name: str) -> Any:
+        """Return a counter with an admitted-add operation."""
+        _require_match(name, _CODE, "metric name")
+        if name not in self._config.metric_names:
+            raise ValueError("undeclared metric name")
+        instrument = self._meter.create_counter(name)
+        config = self._config
+
+        class Counter:
+            """Small metric Port with a fixed label vocabulary."""
+
+            def add(self, value: int, attributes: Mapping[str, object] | None = None) -> None:
+                """Reject high-cardinality labels before recording."""
+                if type(value) is not int or value < 0:
+                    raise ValueError("invalid counter increment")
+                safe = _validate_attributes(attributes or {}, _METRIC_LABELS)
+                declared = {
+                    "operation_code": config.operation_codes,
+                    "bounded_context": config.bounded_contexts,
+                    "dependency": config.dependencies,
+                    "result": _METRIC_OUTCOMES,
+                    "status": _METRIC_OUTCOMES,
+                }
+                if any(item not in declared[key] for key, item in safe.items()):
+                    raise ValueError("undeclared metric label")
+                instrument.add(value, attributes=safe)
+
+        return Counter()
+
+
+@dataclass
+class TelemetryRuntime:
+    """Explicit provider lifetime and safe product-facing Ports."""
+
+    tracer: _TracerPort
+    meter: _MeterPort
+    logger: _LoggerPort
+    _providers: tuple[Any, Any, Any] = field(repr=False)
+    shutdown_failures: int = 0
+
+    def emit(self, event: TelemetryEvent) -> None:
+        """Emit an admitted structured record."""
+        self.logger.emit(event)
+
+    def extract_trace(self, headers: Mapping[str, str]) -> Any:
+        """Admit only a valid W3C traceparent; discard untrusted baggage."""
+        from opentelemetry.context import Context
+        from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+        parent = headers.get("traceparent") if isinstance(headers, Mapping) else None
+        if not isinstance(parent, str) or _TRACEPARENT.fullmatch(parent) is None:
+            return Context()
+        if int(parent[3:35], 16) == 0 or int(parent[36:52], 16) == 0:
+            return Context()
+        return TraceContextTextMapPropagator().extract({"traceparent": parent})
+
+    def inject_trace(self) -> dict[str, str]:
+        """Return only a W3C traceparent for downstream correlation."""
+        from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+        carrier: dict[str, str] = {}
+        TraceContextTextMapPropagator().inject(carrier)
+        return {"traceparent": carrier["traceparent"]} if "traceparent" in carrier else {}
+
+    def shutdown(self) -> None:
+        """Flush and close providers at product shutdown."""
+        for provider in self._providers:
+            try:
+                provider.shutdown()
+            except Exception:
+                self.shutdown_failures += 1
+
+
+def bootstrap(config: TelemetryConfig) -> TelemetryRuntime:
+    """Construct isolated providers and opt into an authenticated OTLP receiver."""
+    if not isinstance(config, TelemetryConfig):
+        raise ValueError("invalid telemetry config")
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+
+    resource = Resource({
+        "service.name": config.service,
+        "service.version": config.version,
+        "deployment.environment.name": config.environment,
+        "cwl.source_revision": config.source_revision,
+    })
+    readers = []
+    if config.receiver:
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+
+        headers = {"Authorization": f"Bearer {config.token}"}
+        readers.append(PeriodicExportingMetricReader(
+            OTLPMetricExporter(
+                endpoint=config.receiver.rstrip("/") + "/v1/metrics", headers=headers, timeout=5,
+                certificate_file=config.ca_file,
+            ),
+            export_interval_millis=60_000,
+        ))
+    meter_provider = MeterProvider(resource=resource, metric_readers=readers, shutdown_on_exit=False)
+    tracer_provider = TracerProvider(resource=resource, shutdown_on_exit=False)
+    logger_provider = LoggerProvider(resource=resource, shutdown_on_exit=False)
+    if config.receiver:
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+
+        headers = {"Authorization": f"Bearer {config.token}"}
+        tracer_provider.add_span_processor(BatchSpanProcessor(
+            OTLPSpanExporter(
+                endpoint=config.receiver.rstrip("/") + "/v1/traces", headers=headers, timeout=5,
+                certificate_file=config.ca_file,
+            ),
+            max_queue_size=config.queue_size,
+            max_export_batch_size=min(128, config.queue_size),
+        ))
+        logger_provider.add_log_record_processor(BatchLogRecordProcessor(
+            OTLPLogExporter(
+                endpoint=config.receiver.rstrip("/") + "/v1/logs", headers=headers, timeout=5,
+                certificate_file=config.ca_file,
+            ),
+            max_queue_size=config.queue_size,
+            max_export_batch_size=min(128, config.queue_size),
+        ))
+    return TelemetryRuntime(
+        tracer=_TracerPort(tracer_provider.get_tracer(config.service, config.version), config),
+        meter=_MeterPort(meter_provider.get_meter(config.service, config.version), config),
+        logger=_LoggerPort(logger_provider.get_logger(config.service, config.version)),
+        _providers=(tracer_provider, meter_provider, logger_provider),
+    )
