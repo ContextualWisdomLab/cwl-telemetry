@@ -85,6 +85,13 @@ def make_security_server(
             if self.path != "/v1/logs":
                 self._reply(404)
                 return
+            for header in (
+                "Authorization", "Content-Type", "Content-Encoding",
+                "Content-Length", "Transfer-Encoding",
+            ):
+                if len(self.headers.get_all(header, [])) > 1:
+                    self._reply(400)
+                    return
             supplied = self.headers.get("Authorization", "")
             if not hmac.compare_digest(supplied, f"Bearer {token}"):
                 self._reply(401)

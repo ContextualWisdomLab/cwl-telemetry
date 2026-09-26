@@ -245,6 +245,26 @@ def test_https_consumer_admits_only_tenant_bound_otlp_and_recovers(tmp_path: Pat
             response.close()
         finally:
             oversized.close()
+        for repeated, value in (
+            ("Authorization", "Bearer wrong-token"),
+            ("Content-Type", "text/plain"),
+            ("Content-Encoding", "gzip"),
+            ("Content-Length", str(len(body))),
+        ):
+            ambiguous = HTTPSConnection("127.0.0.1", server.server_port, context=context, timeout=3)
+            try:
+                ambiguous.putrequest("POST", "/v1/logs")
+                ambiguous.putheader("Authorization", "Bearer synthetic-consumer-token-12345")
+                ambiguous.putheader("Content-Type", "application/x-protobuf")
+                ambiguous.putheader("Content-Encoding", "identity")
+                ambiguous.putheader("Content-Length", str(len(body)))
+                ambiguous.putheader(repeated, value)
+                ambiguous.endheaders(body)
+                response = ambiguous.getresponse()
+                assert response.status == 400
+                response.close()
+            finally:
+                ambiguous.close()
         try:
             assert post(body, target=url.replace("https:", "http:")) != 200
         except (OSError, URLError):
