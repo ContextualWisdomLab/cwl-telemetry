@@ -29,6 +29,37 @@ from cwl_telemetry.security_sender import deliver_pending
 NOW = 1_000_000_000_000_000_000
 
 
+@pytest.mark.parametrize("has_outbox", [False, True])
+def test_siem_sender_closes_connection_on_success_and_failure(tmp_path, monkeypatch, has_outbox):
+    connections = []
+    connect = sqlite3.connect
+
+    def tracked_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    outbox = tmp_path / "lifecycle.sqlite"
+    connection = connect(outbox)
+    if has_outbox:
+        pending_security_events(connection)
+    connection.close()
+    outbox.chmod(0o600)
+    monkeypatch.setattr(sqlite3, "connect", tracked_connect)
+    try:
+        if has_outbox:
+            assert deliver_pending(outbox, gateway="https://siem.example", token="synthetic-token-12345") == 0
+        else:
+            with pytest.raises(ValueError, match="outbox is missing"):
+                deliver_pending(outbox, gateway="https://siem.example", token="synthetic-token-12345")
+        assert len(connections) == 1
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connections[0].execute("SELECT 1")
+    finally:
+        for connection in connections:
+            connection.close()
+
+
 def _attribute(items, key: str, value: str) -> None:
     item = items.add()
     item.key = key

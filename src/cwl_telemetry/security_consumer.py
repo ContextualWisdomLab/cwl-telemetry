@@ -11,6 +11,7 @@ import sqlite3
 import ssl
 import stat
 import time
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -122,7 +123,7 @@ def make_security_server(
                 self._reply(400)
                 return
             try:
-                with sqlite3.connect(outbox, timeout=5) as connection:
+                with closing(sqlite3.connect(outbox, timeout=5)) as connection, connection:
                     decode_security_export(
                         payload, authenticated_tenant=tenant_ref,
                         replay_db=connection, max_pending=max_pending,

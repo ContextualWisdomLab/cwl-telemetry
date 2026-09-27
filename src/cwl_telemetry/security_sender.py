@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import json
 import re
 import sqlite3
@@ -62,7 +63,7 @@ def deliver_pending(
         raise ValueError("outbox must be a private regular file")
     context = ssl.create_default_context(cafile=str(ca_file) if ca_file else None)
     opener = build_opener(_NoRedirect(), HTTPSHandler(context=context))
-    with sqlite3.connect(outbox, timeout=5) as connection:
+    with closing(sqlite3.connect(outbox, timeout=5)) as connection, connection:
         if connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'security_event_outbox'"
         ).fetchone() is None:
