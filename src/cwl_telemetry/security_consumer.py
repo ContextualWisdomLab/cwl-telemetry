@@ -93,7 +93,7 @@ def make_security_server(
                     self._reply(400)
                     return
             supplied = self.headers.get("Authorization", "")
-            if not hmac.compare_digest(supplied, f"Bearer {token}"):
+            if not supplied.isascii() or not hmac.compare_digest(supplied, f"Bearer {token}"):
                 self._reply(401)
                 return
             if self.headers.get("Content-Type") != "application/x-protobuf":

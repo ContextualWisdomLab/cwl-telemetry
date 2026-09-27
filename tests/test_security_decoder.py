@@ -230,6 +230,8 @@ def test_https_consumer_admits_only_tenant_bound_otlp_and_recovers(tmp_path: Pat
         server.RequestHandlerClass.timeout = 1
         assert post(body, token=None) == 401
         assert post(body, token="wrong-token") == 401
+        assert post(body, token="wrong-\xe9-token") == 401
+        assert post(body) == 200  # malformed authentication cannot break subsequent delivery
         assert post(body, content_type="text/plain") == 415
         assert post(body, content_encoding="gzip") == 415
         assert post(b"invalid protobuf") == 400
