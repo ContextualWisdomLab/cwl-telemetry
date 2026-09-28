@@ -42,7 +42,8 @@ def _gateway_url(origin: str) -> str:
     except ValueError:
         valid_port = False
     if (parsed.scheme != "https" or not parsed.hostname or not valid_port
-            or parsed.username or parsed.password or parsed.query or parsed.fragment
+            or parsed.username is not None or parsed.password is not None
+            or parsed.query or parsed.fragment
             or parsed.path not in ("", "/")):
         raise ValueError("invalid SIEM gateway origin")
     return origin.rstrip("/") + "/v1/security-events"

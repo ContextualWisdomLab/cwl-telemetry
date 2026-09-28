@@ -401,6 +401,8 @@ def test_siem_handoff_keeps_outbox_pending_until_exact_https_ack(tmp_path: Path)
         assert token not in rejected_cli.stderr
         with pytest.raises(ValueError, match="origin"):
             deliver_pending(outbox, gateway="http://127.0.0.1", token=token)
+        with pytest.raises(ValueError, match="origin"):
+            deliver_pending(outbox, gateway=f"https://@127.0.0.1:{server.server_port}", token=token)
         with pytest.raises(ValueError, match="token"):
             deliver_pending(outbox, gateway=gateway, token=token + "\r\nInjected: x")
         with pytest.raises(HTTPError) as outage:
