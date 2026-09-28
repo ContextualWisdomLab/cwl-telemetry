@@ -261,6 +261,8 @@ def test_receiver_rejects_url_control_characters_and_label_sets() -> None:
     with pytest.raises(ValueError):
         TelemetryConfig(**base, receiver="https://collector.example\n.evil", token="x" * 16)
     with pytest.raises(ValueError):
+        TelemetryConfig(**base, receiver="https://@collector.example", token="x" * 16)
+    with pytest.raises(ValueError):
         TelemetryConfig(**base, metric_names=["same", "same"])
     with pytest.raises(ValueError):
         TelemetryConfig(**base, operation_codes={f"item_{n}" for n in range(129)})

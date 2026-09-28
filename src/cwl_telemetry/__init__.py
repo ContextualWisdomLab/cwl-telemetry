@@ -123,7 +123,8 @@ class TelemetryConfig:
             any(ord(character) <= 32 for character in self.receiver)
             or
             parsed.scheme != "https" or not parsed.hostname or not valid_port
-            or parsed.username or parsed.password or parsed.query or parsed.fragment
+            or parsed.username is not None or parsed.password is not None
+            or parsed.query or parsed.fragment
             or parsed.path not in ("", "/")
         ):
             raise ValueError("invalid receiver")
