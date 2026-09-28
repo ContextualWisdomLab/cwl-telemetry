@@ -10,13 +10,14 @@ import sqlite3
 import ssl
 import stat
 import sys
+import time
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 from . import _valid_bearer_token
-from .security import mark_security_delivered, pending_security_events
+from .security import _expire_delivered, mark_security_delivered, pending_security_events
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -69,6 +70,8 @@ def deliver_pending(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'security_event_outbox'"
         ).fetchone() is None:
             raise ValueError("security outbox is missing")
+        _expire_delivered(connection, time.time_ns())
+        connection.commit()
         delivered = 0
         for event in pending_security_events(connection, limit=limit):
             event_id = event["event_id"]

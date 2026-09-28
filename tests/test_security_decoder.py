@@ -60,6 +60,24 @@ def test_siem_sender_closes_connection_on_success_and_failure(tmp_path, monkeypa
             connection.close()
 
 
+def test_siem_sender_expires_delivered_replay_rows_without_new_input(tmp_path):
+    outbox = tmp_path / "idle.sqlite"
+    now = time.time_ns()
+    day = 24 * 60 * 60 * 1_000_000_000
+    with sqlite3.connect(outbox) as connection:
+        pending_security_events(connection)
+        connection.executemany(
+            "INSERT INTO security_event_outbox (event_id, record_json, time_unix_nano, delivered) "
+            "VALUES (?, '{}', ?, 1)",
+            [("a" * 32, now - 8 * day), ("b" * 32, now - day)],
+        )
+    outbox.chmod(0o600)
+
+    assert deliver_pending(outbox, gateway="https://siem.example", token="synthetic-token-12345") == 0
+    with sqlite3.connect(outbox) as connection:
+        assert connection.execute("SELECT event_id FROM security_event_outbox").fetchall() == [("b" * 32,)]
+
+
 def _attribute(items, key: str, value: str) -> None:
     item = items.add()
     item.key = key
@@ -348,6 +366,10 @@ def test_siem_handoff_keeps_outbox_pending_until_exact_https_ack(tmp_path: Path)
             _request().SerializeToString(), authenticated_tenant="tenant_1",
             replay_db=connection, now_ns=NOW,
         )
+        connection.execute(
+            "INSERT INTO security_event_outbox (event_id, record_json, time_unix_nano, delivered) "
+            "VALUES (?, '{}', ?, 1)", ("c" * 32, NOW),
+        )
     outbox.chmod(0o600)
     mode = {"value": "outage"}
     captured = []
@@ -408,6 +430,10 @@ def test_siem_handoff_keeps_outbox_pending_until_exact_https_ack(tmp_path: Path)
         with pytest.raises(HTTPError) as outage:
             deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate)
         assert outage.value.fp is None or outage.value.fp.closed
+        with sqlite3.connect(outbox) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM security_event_outbox WHERE event_id = ?", ("c" * 32,)
+            ).fetchone()[0] == 0
         mode["value"] = "wrong_ack"
         with pytest.raises(ValueError, match="acknowledgement"):
             deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate)

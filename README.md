@@ -83,6 +83,9 @@ event ID as an idempotency key. It marks the outbox row delivered only after a
 `200 application/json` acknowledgement containing exactly
 `{"accepted": true, "event_id": "<same ID>"}`. Failed TLS, HTTP, redirect,
 or acknowledgement leaves the row pending for the next operator-scheduled run.
+Each sender run also removes acknowledged replay rows older than seven days,
+even when no new security event arrives; the operator schedule must keep running
+to enforce that local expiry during idle periods. Unacknowledged rows remain.
 The gateway must honor idempotency because an acknowledgement can be lost after
 it accepts an event. A compatible approved destination, operator schedule,
 retention policy, and live SIEM acknowledgement are still unverified. The

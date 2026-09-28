@@ -43,6 +43,13 @@ def _ensure_outbox(replay_db: sqlite3.Connection) -> None:
     )
 
 
+def _expire_delivered(replay_db: sqlite3.Connection, now_ns: int) -> None:
+    replay_db.execute(
+        "DELETE FROM security_event_outbox WHERE delivered = 1 AND time_unix_nano < ?",
+        (now_ns - _MAX_AGE_NS,),
+    )
+
+
 def decode_security_export(
     payload: bytes, *, authenticated_tenant: str, replay_db: sqlite3.Connection,
     now_ns: int | None = None, max_pending: int = 100_000,
@@ -114,10 +121,7 @@ def decode_security_export(
     _ensure_outbox(replay_db)
     try:
         replay_db.execute("BEGIN IMMEDIATE")
-        replay_db.execute(
-            "DELETE FROM security_event_outbox WHERE delivered = 1 AND time_unix_nano < ?",
-            (now - _MAX_AGE_NS,),
-        )
+        _expire_delivered(replay_db, now)
         new_rows = []
         seen = {}
         for row in projected:
