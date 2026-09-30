@@ -44,7 +44,7 @@ def _tls_server_context() -> ssl.SSLContext:
 
 
 def test_security_test_peers_require_tls_1_2() -> None:
-    """Synthetic HTTPS peers must reject legacy TLS before any handshake."""
+    """Synthetic HTTPS peers must reject legacy TLS during negotiation."""
     assert _tls_client_context().minimum_version == ssl.TLSVersion.TLSv1_2
     assert _tls_server_context().minimum_version == ssl.TLSVersion.TLSv1_2
 
