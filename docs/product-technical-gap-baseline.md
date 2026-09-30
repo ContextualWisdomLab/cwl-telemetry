@@ -1,0 +1,126 @@
+# Product and Technical Gap Baseline
+
+Status: Proposed  
+Evidence cutoff: implementation head `9da68ea0dc09f0b582ef12a4718f48b4e1e1927b` on PR #1  
+Release state: no immutable release; consumers must not adopt this branch
+
+This baseline records what `cwl-telemetry` owns, what the current evidence
+proves, and what still blocks a production release. Open PR evidence is
+provisional. A passing check applies only to the exact head it evaluated.
+
+## PRD: product goal and acceptance boundary
+
+`cwl-telemetry` is the optional canonical owner of explicit OpenTelemetry SDK
+bootstrap, bounded telemetry fields, and the Collector routing contract shared
+by ContextualWisdomLab products. Products retain their domain truth,
+authorization, authoritative audit outbox, credential rotation, and deployment
+decisions.
+
+A release candidate is acceptable only when:
+
+1. importing the package creates no provider, thread, or network traffic;
+2. product code explicitly bootstraps a bounded trace, metric, and log runtime;
+3. authenticated OTLP separates operational and normalized security records;
+4. security records remain durable and idempotent until an exact SIEM
+   acknowledgement;
+5. the exact protected-main revision passes contract, SAST, dependency, and
+   CodeQL gates plus independent review;
+6. immutable artifacts, hashes, schema evidence, and a consumer parity test are
+   published before any consumer enables the integration.
+
+## TRD: current evidence
+
+| Requirement | Exact evidence | Status |
+| --- | --- | --- |
+| Explicit, inert bootstrap | `src/cwl_telemetry/__init__.py`; `tests/test_contract.py` | Implemented in Proposed PR |
+| Finite field and security-event vocabulary | `TelemetryConfig`, `TelemetryEvent`, `validate_event` | Implemented in Proposed PR |
+| Authenticated TLS OTLP ingress and route separation | `collector/production.yaml`; pinned real-Collector tests | Implemented; deployment unverified |
+| Tenant-bound normalized security projection | `decode_security_export`; hostile-record tests | Implemented in Proposed PR |
+| Durable idempotency and exact acknowledgement | `security_event_outbox`; `deliver_pending`; failure-injection tests | Implemented in Proposed PR |
+| TLS 1.2 minimum on synthetic HTTPS peers | PR head `9da68ea...`; security decoder tests: 8 passed | Repaired; exact-head CodeQL recheck required |
+| Package completeness | locked build produces wheel and sdist; sdist contains `collector/production.yaml` | Local and hosted contract evidence |
+| Release and consumer adoption | no published release; Naruon migration remains external | Blocked |
+
+The runtime is Python because the supported OpenTelemetry SDK/exporter surface
+is the interoperability boundary. It contains no mathematical or data-science
+hot path. Reconsider a Rust native service only after profiling proves Python
+CPU, concurrency, or isolation is the limiting cause.
+
+## Context Map
+
+```mermaid
+flowchart TD
+    Product[Product bounded context] -->|explicit SDK port| Runtime[cwl-telemetry runtime]
+    Runtime -->|authenticated OTLP| Collector[OpenTelemetry Collector]
+    Collector -->|operational signals| Backend[Telemetry backend]
+    Collector -->|security schema v1| Consumer[Security consumer]
+    Consumer -->|durable normalized row| Outbox[(SQLite outbox)]
+    Outbox -->|exact-ID HTTPS acknowledgement| SIEM[Approved SIEM gateway]
+```
+
+The runtime and Collector are an Anti-Corruption Layer between product-owned
+Ubiquitous Language and vendor telemetry protocols. Product domain events never
+become authoritative merely because they traverse this context.
+
+## UML: security delivery sequence
+
+```mermaid
+sequenceDiagram
+    participant P as Product
+    participant C as Collector
+    participant R as Security consumer
+    participant O as Durable outbox
+    participant S as SIEM gateway
+    P->>C: Authenticated OTLP security event
+    C->>R: Schema-v1 protobuf
+    R->>O: BEGIN IMMEDIATE + idempotent insert
+    R-->>C: Accepted after commit
+    O->>S: HTTPS JSON + Idempotency-Key
+    S-->>O: Exact event-ID acknowledgement
+    O->>O: Mark delivered
+```
+
+Failure invariant: TLS, HTTP, redirect, malformed acknowledgement, process
+restart, or duplicate delivery cannot mark a pending row delivered. A reused
+event ID with different content is rejected.
+
+## ERD: owned persistence
+
+```mermaid
+erDiagram
+    SECURITY_EVENT_OUTBOX {
+        text event_id PK
+        text record_json
+        integer time_unix_nano
+        integer delivered
+    }
+```
+
+This is a single normalized aggregate boundary: one immutable event payload and
+its delivery state. The database is private to the security consumer; other
+contexts use the released HTTPS contract and never query this table.
+
+## Buyer-visible gaps and actions
+
+| Priority | Gap | Action and completion evidence | Status |
+| --- | --- | --- | --- |
+| P0 | CodeQL rejected the prior head for implicit legacy-TLS flows | Require TLS 1.2 explicitly and obtain a successful CodeQL run on the successor exact head | Repair pushed; hosted recheck pending |
+| P0 | No independent current-head approval | Complete review after all exact-head checks; repair every actionable finding | Open |
+| P0 | No immutable release or consumer pin | Merge normally, build from protected main, publish hashes and contract evidence, then bump the consumer to the released artifact | Blocked by PR |
+| P0 | Live backend, SIEM, credential rotation, retention, and persistent-volume recovery are unverified | Run an operator-owned staging exercise with redacted evidence and rollback | Open |
+| P1 | Receiver and sender latency/capacity lack a reproducible SLO result | Add realistic concurrent OTLP and SIEM tests with stated hardware, payload, failure denominator, and p95 target of 20 ms where causally achievable | Open |
+| P1 | Pending-row lookup has no measured large-outbox query plan | Measure realistic backlog sizes; add an index or partition only if the profile proves need | Open |
+| P1 | Repository continuation guides are incomplete | Add `AGENTS.md`, `CLAUDE.md`, `ARCHITECTURE.md`, `CHANGELOG.md`, and security/operability runbooks without duplicating domain contracts | Open |
+| P2 | UI, Figma, Storybook, and locale evidence do not exist | Keep out of scope: this repository owns a headless runtime and Collector contract; record a new ADR before adding an operator UI | Not applicable by current boundary |
+
+## Decision and continuation rule
+
+The selected boundary is a small released library plus deployable Collector and
+security-consumer contracts. Copying source, querying the outbox from another
+service, or consuming a temporary branch is rejected because it creates a
+second writer and bypasses release evidence. Until an immutable release exists,
+consumers use a disabled feature flag or a contract test double.
+
+On every successor head, update the evidence cutoff and the gap table from the
+actual PR, workflow logs, release artifacts, and deployment experiments. Never
+convert Proposed work to Accepted from documentation alone.
