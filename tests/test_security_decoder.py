@@ -29,6 +29,26 @@ from cwl_telemetry.security_sender import deliver_pending
 NOW = 1_000_000_000_000_000_000
 
 
+def _tls_client_context(ca_file: Path | None = None) -> ssl.SSLContext:
+    """Create a test client that rejects TLS versions older than 1.2."""
+    context = ssl.create_default_context(cafile=str(ca_file) if ca_file else None)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
+
+def _tls_server_context() -> ssl.SSLContext:
+    """Create a test server that rejects TLS versions older than 1.2."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
+
+def test_security_test_peers_require_tls_1_2() -> None:
+    """Synthetic HTTPS peers must reject legacy TLS before any handshake."""
+    assert _tls_client_context().minimum_version == ssl.TLSVersion.TLSv1_2
+    assert _tls_server_context().minimum_version == ssl.TLSVersion.TLSv1_2
+
+
 @pytest.mark.parametrize("has_outbox", [False, True])
 def test_siem_sender_closes_connection_on_success_and_failure(tmp_path, monkeypatch, has_outbox):
     connections = []
@@ -218,7 +238,7 @@ def test_https_consumer_admits_only_tenant_bound_otlp_and_recovers(tmp_path: Pat
     worker.start()
     try:
         url = f"https://127.0.0.1:{server.server_port}/v1/logs"
-        context = ssl.create_default_context(cafile=str(certificate))
+        context = _tls_client_context(certificate)
 
         def post(body: bytes, *, token: str | None = "synthetic-consumer-token-12345",
                  content_type: str = "application/x-protobuf", target: str = url,
@@ -407,7 +427,7 @@ def test_siem_handoff_keeps_outbox_pending_until_exact_https_ack(tmp_path: Path)
             self.wfile.write(response)
 
     server = HTTPServer(("127.0.0.1", 0), Gateway)
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context = _tls_server_context()
     context.load_cert_chain(str(certificate), str(private_key))
     server.socket = context.wrap_socket(server.socket, server_side=True)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
