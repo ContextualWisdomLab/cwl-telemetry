@@ -57,7 +57,8 @@ flowchart TD
     Collector -->|security schema v1| Consumer[Security consumer]
     Consumer -->|durable normalized row| Outbox[(SQLite outbox)]
     Outbox -->|pending rows| Sender[Operator-scheduled SIEM sender]
-    Sender -->|HTTPS and exact-ID acknowledgement| SIEM[Approved SIEM gateway]
+    Sender -->|HTTPS JSON and Idempotency-Key| SIEM[Approved SIEM gateway]
+    SIEM -->|exact-ID acknowledgement| Sender
     Sender -->|mark delivered| Outbox
 ```
 
@@ -123,10 +124,11 @@ other contexts use the released HTTPS contract and never query this table.
 ## Decision and continuation rule
 
 The selected boundary is a small released library plus deployable Collector and
-security-consumer contracts. Copying source, querying the outbox from another
-service, or consuming a temporary branch is rejected because it creates a
-second writer and bypasses release evidence. Until an immutable release exists,
-consumers use a disabled feature flag or a contract test double.
+security-consumer contracts. Another context must not query the outbox because
+that couples it to the subsystem's private schema. Copying source or consuming
+a temporary branch bypasses release evidence, while adding another writer risks
+outbox integrity. Until an immutable release exists, consumers use a disabled
+feature flag or a contract test double.
 
 On every successor head, update the implementation identity and the gap table
 from the actual PR, workflow logs, release artifacts, and deployment
