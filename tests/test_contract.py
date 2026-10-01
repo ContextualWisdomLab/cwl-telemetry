@@ -457,6 +457,7 @@ def test_receiver_rejects_url_control_characters_and_label_sets() -> None:
 
 def test_w3c_trace_propagation_preserves_identity_without_baggage() -> None:
     """A remote parent is correlated without copying arbitrary inbound headers."""
+    from opentelemetry.baggage import get_baggage, set_baggage
     from opentelemetry.context import attach, detach
     from cwl_telemetry import TelemetryConfig, bootstrap
 
@@ -465,10 +466,17 @@ def test_w3c_trace_propagation_preserves_identity_without_baggage() -> None:
     ))
     parent = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
     context = runtime.extract_trace({"traceparent": parent, "baggage": "person@example.com"})
+    context = set_baggage("secret", "person@example.com", context=context)
     token = attach(context)
     try:
-        with runtime.tracer.start_as_current_span("work"):
+        with runtime.tracer.start_as_current_span("work") as outer:
+            assert get_baggage("secret") is None
             outbound = runtime.inject_trace()
+            with runtime.tracer.start_as_current_span("nested") as inner:
+                assert get_baggage("secret") is None
+                assert inner._span.parent.span_id == outer._span.context.span_id
+            assert get_baggage("secret") is None
+        assert get_baggage("secret") == "person@example.com"
     finally:
         detach(token)
     assert outbound["traceparent"].split("-")[1] == "a" * 32

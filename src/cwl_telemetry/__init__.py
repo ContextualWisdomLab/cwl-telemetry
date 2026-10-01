@@ -268,7 +268,7 @@ class _TracerPort:
 
         @contextmanager
         def current_span() -> Iterator[_SpanPort]:
-            from opentelemetry.context import Context
+            from opentelemetry.context import Context, attach, detach
             from opentelemetry.trace import (
                 NonRecordingSpan, SpanContext, TraceState, get_current_span, set_span_in_context,
             )
@@ -284,11 +284,15 @@ class _TracerPort:
                     trace_state=TraceState(),
                 )
                 parent = set_span_in_context(NonRecordingSpan(admitted), parent)
-            with self._tracer.start_as_current_span(
-                name, context=parent, attributes=safe,
-                record_exception=False, set_status_on_exception=False,
-            ) as span:
-                yield _SpanPort(span, self._config)
+            token = attach(parent)
+            try:
+                with self._tracer.start_as_current_span(
+                    name, context=parent, attributes=safe,
+                    record_exception=False, set_status_on_exception=False,
+                ) as span:
+                    yield _SpanPort(span, self._config)
+            finally:
+                detach(token)
 
         return current_span()
 
