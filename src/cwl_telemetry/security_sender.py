@@ -48,6 +48,18 @@ def _ack_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return fields
 
 
+def _gateway_document(response) -> dict[str, object] | None:
+    """Decode one small, duplicate-free JSON gateway response."""
+    body = response.read(1025)
+    if response.headers.get_all("Content-Type") != ["application/json"] or len(body) > 1024:
+        return None
+    try:
+        document = json.loads(body, object_pairs_hook=_ack_fields)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    return document if isinstance(document, dict) else None
+
+
 def _gateway_url(origin: str) -> str:
     if not isinstance(origin, str) or any(ord(char) <= 32 for char in origin):
         raise ValueError("invalid SIEM gateway origin")
@@ -102,24 +114,20 @@ def deliver_pending(
             )
             try:
                 with opener.open(request, timeout=5) as response:
-                    body = response.read(1025)
-                    if (response.status != 200 or response.headers.get_all("Content-Type") != ["application/json"]
-                            or len(body) > 1024):
+                    acknowledgement = _gateway_document(response)
+                    if response.status != 200 or acknowledgement is None:
                         raise ValueError("invalid SIEM acknowledgement")
             except HTTPError as error:
                 status_code = error.code
+                rejection = _gateway_document(error)
                 error.close()
-                if status_code in _PERMANENT_EVENT_REJECTION_CODES:
+                if (status_code in _PERMANENT_EVENT_REJECTION_CODES
+                        and rejection == {"rejected": True, "event_id": event_id}):
                     _quarantine_security_event(connection, event_id)
                     quarantined += 1
                     continue
                 raise
-            try:
-                acknowledgement = json.loads(body, object_pairs_hook=_ack_fields)
-            except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                raise ValueError("invalid SIEM acknowledgement") from error
-            if (not isinstance(acknowledgement, dict)
-                    or acknowledgement.keys() != {"accepted", "event_id"}
+            if (acknowledgement.keys() != {"accepted", "event_id"}
                     or acknowledgement["accepted"] is not True
                     or acknowledgement["event_id"] != event_id):
                 raise ValueError("invalid SIEM acknowledgement")

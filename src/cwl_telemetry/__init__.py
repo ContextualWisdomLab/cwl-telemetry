@@ -10,6 +10,7 @@ import re
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from os import environ
 from pathlib import Path
 from threading import Lock
 from typing import Any, ContextManager, Iterator, Mapping
@@ -152,10 +153,12 @@ class TelemetryEvent:
 
 def _validate_attributes(attributes: Mapping[str, object], allowed: frozenset[str]) -> dict[str, object]:
     """Return a safe copy of bounded structured attributes."""
-    if not isinstance(attributes, Mapping) or len(attributes) > 24:
+    if not isinstance(attributes, Mapping):
         raise ValueError("invalid attributes")
     safe: dict[str, object] = {}
     for key, value in attributes.items():
+        if key in safe or len(safe) >= 24:
+            raise ValueError("invalid attributes")
         if key not in allowed:
             raise ValueError("unknown telemetry attribute")
         if key in ("retry_count", "duration_ms"):
@@ -181,8 +184,8 @@ def _validate_attributes(attributes: Mapping[str, object], allowed: frozenset[st
     return safe
 
 
-def validate_event(event: TelemetryEvent) -> TelemetryEvent:
-    """Reject unknown, unbounded, or sensitive event content before export."""
+def _validated_event_attributes(event: TelemetryEvent) -> dict[str, object]:
+    """Validate an event and return its single admitted attribute snapshot."""
     if not isinstance(event, TelemetryEvent):
         raise ValueError("invalid telemetry event")
     if not isinstance(event.name, str) or len(event.name) > _MAX_EVENT_NAME_LENGTH:
@@ -196,13 +199,21 @@ def validate_event(event: TelemetryEvent) -> TelemetryEvent:
         raise ValueError("invalid purpose")
     if event.kind not in ("operational", "security"):
         raise ValueError("invalid signal kind")
+    if event.name in _SECURITY_EVENTS and event.kind != "security":
+        raise ValueError("security event requires security kind")
     if event.kind == "security" and event.purpose_code != "security_investigation":
         raise ValueError("security signals require security purpose")
     if event.kind == "security" and event.name not in _SECURITY_EVENTS:
         raise ValueError("undeclared security event")
-    if event.kind == "security" and not {"event_id", "tenant_ref"} <= event.attributes.keys():
+    safe = _validate_attributes(event.attributes, _ATTRIBUTES)
+    if event.kind == "security" and not {"event_id", "tenant_ref"} <= safe.keys():
         raise ValueError("security event requires stable identity and tenant")
-    _validate_attributes(event.attributes, _ATTRIBUTES)
+    return safe
+
+
+def validate_event(event: TelemetryEvent) -> TelemetryEvent:
+    """Reject unknown, unbounded, or sensitive event content before export."""
+    _validated_event_attributes(event)
     return event
 
 
@@ -215,7 +226,7 @@ class _LoggerPort:
 
     def emit(self, event: TelemetryEvent) -> None:
         """Never fail product work for an ordinary export-path error."""
-        validate_event(event)
+        attributes = _validated_event_attributes(event)
         from opentelemetry._logs import SeverityNumber
 
         try:
@@ -226,7 +237,7 @@ class _LoggerPort:
                 body=event.name,
                 event_name=event.name,
                 attributes={
-                    **_validate_attributes(event.attributes, _ATTRIBUTES),
+                    **attributes,
                     "cwl.classification": event.classification,
                     "cwl.purpose_code": event.purpose_code,
                     "cwl.kind": event.kind,
@@ -398,9 +409,12 @@ def bootstrap(config: TelemetryConfig) -> TelemetryRuntime:
     """Construct isolated providers and opt into an authenticated OTLP receiver."""
     if not isinstance(config, TelemetryConfig):
         raise ValueError("invalid telemetry config")
+    if environ.get("OTEL_SDK_DISABLED", "").lower().strip() == "true":
+        raise ValueError("OTEL_SDK_DISABLED conflicts with explicit telemetry bootstrap")
     from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace import SpanLimits, TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.sdk.trace.sampling import ALWAYS_ON
     from opentelemetry.sdk.metrics import MeterProvider
     from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
     from opentelemetry.sdk._logs import LoggerProvider
@@ -425,7 +439,21 @@ def bootstrap(config: TelemetryConfig) -> TelemetryRuntime:
             export_interval_millis=60_000,
         ))
     meter_provider = MeterProvider(resource=resource, metric_readers=readers, shutdown_on_exit=False)
-    tracer_provider = TracerProvider(resource=resource, shutdown_on_exit=False)
+    tracer_provider = TracerProvider(
+        resource=resource,
+        sampler=ALWAYS_ON,
+        span_limits=SpanLimits(
+            max_attributes=24,
+            max_span_attributes=24,
+            max_event_attributes=0,
+            max_link_attributes=0,
+            max_events=0,
+            max_links=0,
+            max_attribute_length=128,
+            max_span_attribute_length=128,
+        ),
+        shutdown_on_exit=False,
+    )
     logger_provider = LoggerProvider(resource=resource, shutdown_on_exit=False)
     if config.receiver:
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter

@@ -30,6 +30,13 @@ labels are admitted by finite vocabularies. Security events also require an
 opaque tenant reference and stable 32-hex event ID. Authoritative audit and
 domain events must use a separate durable product outbox.
 
+`bootstrap()` owns its sampling and span limits: ambient OpenTelemetry sampler
+and span-limit variables cannot silently weaken the admitted contract. Root
+spans are sampled, spans cannot add events or links, and at most 24 bounded
+attributes of at most 128 characters are retained. An ambient
+`OTEL_SDK_DISABLED=true` is rejected because an explicit bootstrap must not
+quietly return a no-op runtime.
+
 Operational event names are limited to 128 characters. Trace and log exporters
 send at most 16 admitted records per request. The trace Port preserves an
 inherited parent's trace identity and flags but discards baggage and TraceState,
@@ -91,16 +98,20 @@ The sender posts one normalized JSON event to `/v1/security-events` with its
 event ID as an idempotency key. It marks the outbox row delivered only after a
 `200 application/json` acknowledgement containing exactly
 `{"accepted": true, "event_id": "<same ID>"}`. An authenticated `400` or
-`422` rejects that event permanently: the sender retains it with quarantine
-state `2`, continues with later rows, reports the quarantine count, and exits
-with status `2` so operators must investigate. Network, TLS, redirect,
+`422` rejects that event permanently only when its bounded JSON body is exactly
+`{"rejected": true, "event_id": "<same ID>"}`. The sender retains that row
+with quarantine state `2`, continues with later rows, reports the quarantine
+count, and exits with status `2` so operators must investigate. Network, TLS,
+redirect, an unbound or malformed rejection,
 `401`, `403`, `404`, `408`, `409`, `429`, 5xx, and malformed or
 mismatched acknowledgements remain pending and fail closed because acceptance
 or operator configuration is not safely known. Each sender run also removes
 acknowledged replay rows older than seven days, even when no new security event
 arrives; the operator schedule must keep running to enforce that local expiry
-during idle periods. Quarantined rows remain for operator evidence and are not
-reported as delivered. The gateway must honor idempotency because an
+during idle periods. Pending and quarantined rows share the configured outbox
+capacity, so quarantine cannot bypass the disk-growth guard. Quarantined rows
+remain for operator evidence and are not reported as delivered. The gateway
+must honor idempotency because an
 acknowledgement can be lost after it accepts an event. A compatible approved
 destination, operator schedule, retention policy, quarantine runbook, and live
 SIEM acknowledgement are still unverified. The receiver cannot execute a

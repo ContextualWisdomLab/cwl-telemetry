@@ -138,10 +138,10 @@ def decode_security_export(
             if previous is None:
                 new_rows.append((event_id, encoded, row["time_unix_nano"]))
             seen[event_id] = encoded
-        pending = replay_db.execute(
-            "SELECT COUNT(*) FROM security_event_outbox WHERE delivered = 0"
+        retained = replay_db.execute(
+            "SELECT COUNT(*) FROM security_event_outbox WHERE delivered <> 1"
         ).fetchone()[0]
-        if pending + len(new_rows) > max_pending:
+        if retained + len(new_rows) > max_pending:
             raise ValueError("security outbox full")
         replay_db.executemany(
             "INSERT INTO security_event_outbox (event_id, record_json, time_unix_nano) VALUES (?, ?, ?)",
