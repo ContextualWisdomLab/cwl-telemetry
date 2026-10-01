@@ -564,6 +564,7 @@ def test_w3c_trace_propagation_preserves_identity_without_baggage() -> None:
     """A remote parent is correlated without copying arbitrary inbound headers."""
     from opentelemetry.baggage import get_baggage, set_baggage
     from opentelemetry.context import attach, detach
+    from opentelemetry.trace import get_current_span
     from cwl_telemetry import TelemetryConfig, bootstrap
 
     runtime = bootstrap(TelemetryConfig(
@@ -588,6 +589,8 @@ def test_w3c_trace_propagation_preserves_identity_without_baggage() -> None:
     assert set(outbound) == {"traceparent"}
     assert runtime.inject_trace() == {}
     assert runtime.extract_trace({"traceparent": "garbage"}) is not None
+    ambiguous = runtime.extract_trace({"traceparent": parent, "TraceParent": parent})
+    assert not get_current_span(ambiguous).get_span_context().is_valid
     runtime.shutdown()
 
 

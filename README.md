@@ -41,7 +41,9 @@ Operational event names are limited to 128 characters. Trace and log exporters
 send at most 16 admitted records per request. The trace Port preserves an
 inherited parent's trace identity and flags but discards baggage and TraceState,
 so a worst-case admitted batch remains within the production Collector's
-65,536-byte ingress limit. Counter increments and each canonical label series'
+65,536-byte ingress limit. Inbound `traceparent` field names are matched without
+case sensitivity, as HTTP requires; duplicate `traceparent` fields fail closed.
+Counter increments and each canonical label series'
 cumulative total must remain within the nonnegative signed 64-bit OTLP wire
 range; an overflow is rejected before it can poison an export. Repeated factory
 calls share that series accounting.

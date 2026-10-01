@@ -10,6 +10,8 @@ All notable changes to this unreleased package are recorded here.
   route and export the same immutable attribute snapshot that admission checked.
 - Make trace sampling and span limits explicit, and reject an ambient global SDK
   disable instead of silently returning a no-op runtime.
+- Match inbound W3C `traceparent` field names without case sensitivity and
+  reject ambiguous duplicates.
 - Require an exact event-bound JSON Boolean rejection before quarantine and
   count pending plus quarantined rows against the same outbox capacity.
 - Reject operational event names longer than 128 characters before export.
