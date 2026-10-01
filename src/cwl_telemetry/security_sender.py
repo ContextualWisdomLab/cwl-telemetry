@@ -12,12 +12,26 @@ import stat
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 from . import _valid_bearer_token
-from .security import _expire_delivered, mark_security_delivered, pending_security_events
+from .security import (
+    _expire_delivered, _quarantine_security_event, mark_security_delivered,
+    pending_security_events,
+)
+
+
+_PERMANENT_EVENT_REJECTION_CODES = frozenset({400, 422})
+
+
+class DeliverySummary(NamedTuple):
+    """Count acknowledged and quarantined rows handled by one sender run."""
+
+    delivered: int
+    quarantined: int
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -53,8 +67,8 @@ def _gateway_url(origin: str) -> str:
 def deliver_pending(
     outbox: Path, *, gateway: str, token: str, ca_file: Path | None = None,
     limit: int = 100,
-) -> int:
-    """Mark each record only after the gateway acknowledges its exact event ID."""
+) -> DeliverySummary:
+    """Deliver pending rows while isolating authenticated permanent rejections."""
     target = _gateway_url(gateway)
     if not _valid_bearer_token(token):
         raise ValueError("invalid SIEM gateway token")
@@ -73,6 +87,7 @@ def deliver_pending(
         _expire_delivered(connection, time.time_ns())
         connection.commit()
         delivered = 0
+        quarantined = 0
         for event in pending_security_events(connection, limit=limit):
             event_id = event["event_id"]
             if re.fullmatch(r"[0-9a-f]{32}", event_id) is None:
@@ -92,7 +107,12 @@ def deliver_pending(
                             or len(body) > 1024):
                         raise ValueError("invalid SIEM acknowledgement")
             except HTTPError as error:
+                status_code = error.code
                 error.close()
+                if status_code in _PERMANENT_EVENT_REJECTION_CODES:
+                    _quarantine_security_event(connection, event_id)
+                    quarantined += 1
+                    continue
                 raise
             try:
                 acknowledgement = json.loads(body, object_pairs_hook=_ack_fields)
@@ -105,7 +125,7 @@ def deliver_pending(
                 raise ValueError("invalid SIEM acknowledgement")
             mark_security_delivered(connection, event_id)
             delivered += 1
-    return delivered
+    return DeliverySummary(delivered=delivered, quarantined=quarantined)
 
 
 def main() -> None:
@@ -117,13 +137,16 @@ def main() -> None:
     args = parser.parse_args()
     token = sys.stdin.readline(4097).rstrip("\n")
     try:
-        count = deliver_pending(
+        summary = deliver_pending(
             args.outbox, gateway=args.gateway, token=token,
             ca_file=args.ca_file, limit=args.limit,
         )
     except Exception:
         raise SystemExit("Security delivery unavailable; unacknowledged events remain pending") from None
-    print(f"Acknowledged security events: {count}")
+    print(f"Acknowledged security events: {summary.delivered}")
+    print(f"Quarantined security events: {summary.quarantined}")
+    if summary.quarantined:
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
