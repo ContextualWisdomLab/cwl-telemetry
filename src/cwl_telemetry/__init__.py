@@ -11,6 +11,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Lock
 from typing import Any, ContextManager, Iterator, Mapping
 from urllib.parse import urlsplit
 
@@ -41,6 +42,9 @@ _CLASSIFICATIONS = frozenset({"public", "internal", "confidential", "restricted"
 _PURPOSES = frozenset({"operations", "performance", "reliability", "security_investigation"})
 _SEVERITIES = frozenset({"DEBUG", "INFO", "WARN", "ERROR"})
 _METRIC_OUTCOMES = frozenset({"success", "failure", "timeout", "cancelled", "unknown"})
+_MAX_EVENT_NAME_LENGTH = 128
+_MAX_EXPORT_BATCH_SIZE = 16
+_MAX_COUNTER_VALUE = (1 << 63) - 1
 _SECURITY_EVENTS = frozenset({
     "authentication.denied", "privilege.changed", "secret.accessed", "policy.decided",
     "malware.detected", "sandbox.failed", "egress.suspicious", "integrity.violated",
@@ -181,6 +185,8 @@ def validate_event(event: TelemetryEvent) -> TelemetryEvent:
     """Reject unknown, unbounded, or sensitive event content before export."""
     if not isinstance(event, TelemetryEvent):
         raise ValueError("invalid telemetry event")
+    if not isinstance(event.name, str) or len(event.name) > _MAX_EVENT_NAME_LENGTH:
+        raise ValueError("invalid event name")
     _require_match(event.name, _EVENT, "event name")
     if event.severity not in _SEVERITIES:
         raise ValueError("invalid severity")
@@ -287,8 +293,12 @@ class _MeterPort:
         class Counter:
             """Small metric Port with a fixed label vocabulary."""
 
+            def __init__(self) -> None:
+                self._total = 0
+                self._lock = Lock()
+
             def add(self, value: int, attributes: Mapping[str, object] | None = None) -> None:
-                """Reject high-cardinality labels before recording."""
+                """Reject high-cardinality labels and wire-unsafe totals."""
                 if type(value) is not int or value < 0:
                     raise ValueError("invalid counter increment")
                 safe = _validate_attributes(attributes or {}, _METRIC_LABELS)
@@ -301,7 +311,11 @@ class _MeterPort:
                 }
                 if any(item not in declared[key] for key, item in safe.items()):
                     raise ValueError("undeclared metric label")
-                instrument.add(value, attributes=safe)
+                with self._lock:
+                    if value > _MAX_COUNTER_VALUE - self._total:
+                        raise ValueError("invalid counter increment")
+                    instrument.add(value, attributes=safe)
+                    self._total += value
 
         return Counter()
 
@@ -393,7 +407,7 @@ def bootstrap(config: TelemetryConfig) -> TelemetryRuntime:
                 certificate_file=config.ca_file,
             ),
             max_queue_size=config.queue_size,
-            max_export_batch_size=min(128, config.queue_size),
+            max_export_batch_size=min(_MAX_EXPORT_BATCH_SIZE, config.queue_size),
         ))
         logger_provider.add_log_record_processor(BatchLogRecordProcessor(
             OTLPLogExporter(
@@ -401,7 +415,7 @@ def bootstrap(config: TelemetryConfig) -> TelemetryRuntime:
                 certificate_file=config.ca_file,
             ),
             max_queue_size=config.queue_size,
-            max_export_batch_size=min(128, config.queue_size),
+            max_export_batch_size=min(_MAX_EXPORT_BATCH_SIZE, config.queue_size),
         ))
     return TelemetryRuntime(
         tracer=_TracerPort(tracer_provider.get_tracer(config.service, config.version), config),

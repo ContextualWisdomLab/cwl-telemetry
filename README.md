@@ -30,6 +30,12 @@ labels are admitted by finite vocabularies. Security events also require an
 opaque tenant reference and stable 32-hex event ID. Authoritative audit and
 domain events must use a separate durable product outbox.
 
+Operational event names are limited to 128 characters. Trace and log exporters
+send at most 16 admitted records per request so a worst-case valid batch remains
+within the production Collector's 65,536-byte ingress limit. Counter increments
+and their cumulative instrument total must remain within the nonnegative signed
+64-bit OTLP wire range; an overflow is rejected before it can poison an export.
+
 ## Signal route and ownership
 
 | Step | Owner | Purpose | Retention |
@@ -121,6 +127,9 @@ stale timestamps, tenant mismatch, idempotent retry, conflicting replay, HTTPS a
 persisted pending security event. No live backend or SIEM has been verified.
 Operator-managed retention, persistent-volume deployment, an approved SIEM
 sender, and a released consumer migration remain required before production.
+Metric-series cardinality and whole-request size still require a realistic
+backlog/load measurement before production; the counter wire-range guard is not
+a substitute for that evidence.
 
 After the runtime PR is merged and its exact main head has passed required
 checks and independent review, dispatch `Prepare telemetry release` on `main`.

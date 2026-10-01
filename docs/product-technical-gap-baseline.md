@@ -1,8 +1,11 @@
 # Product and Technical Gap Baseline
 
-Status: Proposed  
-Implementation evidence: `9da68ea0dc09f0b582ef12a4718f48b4e1e1927b` on PR #1  
-Last document-inclusive head: `0dec365a30f708f395d5bfe4811cb8dac7549fc7`  
+Status: Proposed
+
+Implementation evidence: successor TDD repair on PR #1; immutable exact head is recorded in the PR after publication
+
+Last reviewed predecessor head: `ab81a4d4d7b0754ec1064c2862a2fe27b69338b5`
+
 Release state: no immutable release; consumers must not adopt this branch
 
 This baseline records what `cwl-telemetry` owns, what the current evidence
@@ -38,6 +41,8 @@ A release candidate is acceptable only when:
 | Authenticated TLS OTLP ingress and route separation | `collector/production.yaml`; pinned real-Collector tests | Implemented; deployment unverified |
 | Tenant-bound normalized security projection | `decode_security_export`; hostile-record tests | Implemented in Proposed PR |
 | Durable idempotency and exact acknowledgement | `security_event_outbox`; `deliver_pending`; failure-injection tests | Implemented in Proposed PR |
+| Bounded OTLP record and batch size | 128-character event-name admission; real pinned-encoder burst test for 16-record log/trace batches | Repaired in successor working tree; hosted exact-head evidence required |
+| Wire-safe counter totals | signed-int64 increment and cumulative-total admission tests | Repaired in successor working tree; hosted exact-head evidence required |
 | TLS 1.2 minimum on synthetic HTTPS peers | Implementation commit `9da68ea...`; security decoder tests: 8 passed | Repaired; successor exact-head CodeQL recheck required |
 | Package completeness | locked build produces wheel and sdist; sdist contains `collector/production.yaml`; Telemetry contract run `36753473023` passed on `0dec365...` | Exact-head evidence applies only to `0dec365...` |
 | Release and consumer adoption | no published release; Naruon migration remains external | Blocked |
@@ -112,11 +117,14 @@ other contexts use the released HTTPS contract and never query this table.
 | Priority | Gap | Action and completion evidence | Status |
 | --- | --- | --- | --- |
 | P0 | CodeQL rejected the prior head for implicit legacy-TLS flows | Require TLS 1.2 explicitly and obtain a successful CodeQL run on the successor exact head | Repair at `9da68ea...`; terminal successor verdict pending |
+| P0 | Valid 128-record SDK bursts exceeded the Collector's 65,536-byte ingress limit | Bound trace/log exports to 16 records and encode worst-case admitted batches with pinned OTel in the regression suite | Repaired locally; hosted successor evidence pending |
+| P0 | Operational event names and cumulative counter totals could exceed OTLP wire bounds | Reject event names above 128 characters and counter totals above signed-int64 before calling the SDK | Repaired locally; hosted successor evidence pending |
 | P0 | No independent current-head approval | Complete review after all exact-head checks; repair every actionable finding | Open |
 | P0 | No immutable release or consumer pin | Merge normally, build from protected main, publish hashes and contract evidence, then bump the consumer to the released artifact | Blocked by PR |
 | P0 | Live backend, SIEM, credential rotation, retention, and persistent-volume recovery are unverified | Run an operator-owned staging exercise with redacted evidence and rollback | Open |
 | P1 | Receiver admission latency/capacity lacks a reproducible SLO result | On stated hardware, measure 100 RPS at concurrency 16 with a 1 KiB/64 KiB payload mix and a 100,000-row backlog; require receiver p95 at or below 20 ms and report every rejection or timeout | Open |
 | P1 | Sender overhead and external SIEM latency are conflated | Measure sender overhead against a loopback acknowledgement gateway with p95 at or below 20 ms, then report a separate end-to-end distribution including external gateway latency and outage retries | Open |
+| P1 | Metrics payload size can still grow with admitted series cardinality | Profile the pinned SDK with the maximum declared metric vocabulary and realistic label combinations; add a cross-instrument series budget only if the encoded request can exceed 65,536 bytes | Open |
 | P1 | Pending-row lookup has no measured large-outbox query plan | Measure realistic backlog sizes; add an index or partition only if the profile proves need | Open |
 | P1 | Repository continuation guides are incomplete | Add `AGENTS.md`, `CLAUDE.md`, `ARCHITECTURE.md`, `CHANGELOG.md`, and security/operability runbooks without duplicating domain contracts | Open |
 | P2 | UI, Figma, Storybook, and locale evidence do not exist | Keep out of scope: this repository owns a headless runtime and Collector contract; record a new ADR before adding an operator UI | Not applicable by current boundary |

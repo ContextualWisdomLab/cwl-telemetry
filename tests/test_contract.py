@@ -76,6 +76,22 @@ def test_event_admission_rejects_raw_secrets_pii_and_unknown_fields() -> None:
             ))
 
 
+def test_event_name_is_bounded_before_export() -> None:
+    """An operational event name cannot exceed the bounded OTLP record contract."""
+    from cwl_telemetry import TelemetryEvent, validate_event
+
+    boundary = TelemetryEvent(
+        name="a." + "b" * 126, severity="INFO", classification="internal",
+        purpose_code="operations", kind="operational",
+    )
+    assert validate_event(boundary) is boundary
+    with pytest.raises(ValueError, match="event name"):
+        validate_event(TelemetryEvent(
+            name="a." + "b" * 127, severity="INFO", classification="internal",
+            purpose_code="operations", kind="operational",
+        ))
+
+
 def test_bootstrap_is_explicit_and_product_work_completes() -> None:
     """An in-process runtime exposes the three safe Ports."""
     from cwl_telemetry import TelemetryConfig, TelemetryEvent, bootstrap
@@ -219,6 +235,114 @@ def test_metric_and_span_ports_reject_unbounded_attributes() -> None:
     with pytest.raises(ValueError):
         runtime.meter.counter("unregistered_total")
     runtime.shutdown()
+
+
+def test_counter_rejects_signed_int64_wire_and_aggregate_overflow() -> None:
+    """An increment cannot poison the cumulative OTLP metrics payload."""
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+        metric_names=frozenset({"work_total"}),
+    ))
+    counter = runtime.meter.counter("work_total")
+    with pytest.raises(ValueError, match="counter increment"):
+        counter.add(1 << 63)
+    counter.add((1 << 63) - 1)
+    with pytest.raises(ValueError, match="counter increment"):
+        counter.add(1)
+    runtime.shutdown()
+
+
+def test_valid_log_bursts_stay_within_collector_ingress_limit(monkeypatch) -> None:
+    """Every SDK log and trace batch fits the Collector request limit."""
+    from opentelemetry.exporter.otlp.proto.common._internal._log_encoder import encode_logs
+    from opentelemetry.exporter.otlp.proto.common._internal.trace_encoder import encode_spans
+    from opentelemetry.exporter.otlp.proto.http import _log_exporter
+    from opentelemetry.exporter.otlp.proto.http import trace_exporter
+    from opentelemetry.sdk._logs.export import LogExportResult
+    from opentelemetry.sdk.trace.export import SpanExportResult
+    from cwl_telemetry import TelemetryConfig, TelemetryEvent, bootstrap
+
+    encoded_log_batches: list[tuple[int, int]] = []
+    encoded_span_batches: list[tuple[int, int]] = []
+
+    class CapturingExporter:
+        """Encode actual SDK batches while replacing only external HTTP delivery."""
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def export(self, batch):
+            encoded_log_batches.append((len(batch), encode_logs(batch).ByteSize()))
+            return LogExportResult.SUCCESS
+
+        def shutdown(self):
+            pass
+
+        def force_flush(self, timeout_millis=30_000):
+            return True
+
+    class CapturingSpanExporter:
+        """Encode actual span batches while replacing only external HTTP delivery."""
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def export(self, batch):
+            encoded_span_batches.append((len(batch), encode_spans(batch).ByteSize()))
+            return SpanExportResult.SUCCESS
+
+        def shutdown(self):
+            pass
+
+        def force_flush(self, timeout_millis=30_000):
+            return True
+
+    monkeypatch.setattr(_log_exporter, "OTLPLogExporter", CapturingExporter)
+    monkeypatch.setattr(trace_exporter, "OTLPSpanExporter", CapturingSpanExporter)
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+        receiver="https://collector.example", token="synthetic-token-12345",
+        route_templates={"/" + "r" * 127},
+    ))
+    attributes = {
+        "operation_code": "o" * 64,
+        "bounded_context": "b" * 64,
+        "tenant_ref": "t" * 64,
+        "workspace_ref": "w" * 64,
+        "principal_ref": "p" * 64,
+        "request_id": "a" * 32,
+        "event_id": "b" * 32,
+        "trace_id": "c" * 32,
+        "span_id": "d" * 16,
+        "resource_ref": "r" * 64,
+        "action": "a" * 64,
+        "result": "r" * 64,
+        "status": "s" * 64,
+        "error_type": "e" * 64,
+        "error_code": "e" * 64,
+        "retry_count": 1_000_000_000,
+        "duration_ms": 1_000_000_000,
+        "dependency": "d" * 64,
+        "provider": "p" * 64,
+        "provenance_ref": "v" * 64,
+        "http_route": "/" + "r" * 127,
+        "source_location": "s" * 96 + ":9999999",
+    }
+    for _ in range(128):
+        with runtime.tracer.start_as_current_span("s" * 64, attributes):
+            pass
+        runtime.emit(TelemetryEvent(
+            name="a." + "b" * 126, severity="INFO", classification="internal",
+            purpose_code="operations", kind="operational", attributes=attributes,
+        ))
+    runtime.shutdown()
+
+    assert sum(count for count, _size in encoded_log_batches) == 128
+    assert sum(count for count, _size in encoded_span_batches) == 128
+    assert all(count <= 16 and size <= 65_536 for count, size in encoded_log_batches)
+    assert all(count <= 16 and size <= 65_536 for count, size in encoded_span_batches)
 
 
 def test_span_context_does_not_record_exception_content() -> None:
