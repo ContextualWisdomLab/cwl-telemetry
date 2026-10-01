@@ -589,8 +589,36 @@ def test_w3c_trace_propagation_preserves_identity_without_baggage() -> None:
     assert set(outbound) == {"traceparent"}
     assert runtime.inject_trace() == {}
     assert runtime.extract_trace({"traceparent": "garbage"}) is not None
-    ambiguous = runtime.extract_trace({"traceparent": None, "TraceParent": parent})
-    assert not get_current_span(ambiguous).get_span_context().is_valid
+    for duplicate_headers in (
+        {"traceparent": None, "TraceParent": parent},
+        {"traceparent": parent, "TraceParent": None},
+        {"traceparent": parent, "TraceParent": parent},
+    ):
+        ambiguous = runtime.extract_trace(duplicate_headers)
+        assert not get_current_span(ambiguous).get_span_context().is_valid
+
+    class OneShotHeaders(Mapping):
+        """Expose headers through one immutable traversal only."""
+
+        item_reads = 0
+
+        def __getitem__(self, _key):
+            raise AssertionError("trace extraction should use one items snapshot")
+
+        def __iter__(self):
+            raise AssertionError("trace extraction should use one items snapshot")
+
+        def __len__(self):
+            raise AssertionError("trace extraction should use one items snapshot")
+
+        def items(self):
+            self.item_reads += 1
+            return [("TRACEPARENT", parent), ("baggage", "person@example.com")]
+
+    one_shot_headers = OneShotHeaders()
+    one_shot_context = runtime.extract_trace(one_shot_headers)
+    assert one_shot_headers.item_reads == 1
+    assert get_current_span(one_shot_context).get_span_context().trace_id == int("a" * 32, 16)
     runtime.shutdown()
 
 
