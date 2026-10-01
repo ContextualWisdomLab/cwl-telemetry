@@ -41,10 +41,10 @@ A release candidate is acceptable only when:
 | Authenticated TLS OTLP ingress and route separation | `collector/production.yaml`; pinned real-Collector tests | Implemented; deployment unverified |
 | Tenant-bound normalized security projection | `decode_security_export`; hostile-record tests | Implemented in Proposed PR |
 | Durable idempotency and exact acknowledgement | `security_event_outbox`; `deliver_pending`; failure-injection tests | Implemented in Proposed PR |
-| Bounded OTLP record and batch size | 128-character event-name admission; inherited TraceState removal; real pinned-encoder burst test for 16-record log/trace batches | Repaired in successor working tree; hosted exact-head evidence required |
-| Wire-safe counter totals | signed-int64 increment and canonical label-series cumulative admission with repeated-handle and concurrency tests against the pinned metric encoder | Repaired in successor working tree; hosted exact-head evidence required |
+| Bounded OTLP record and batch size | 128-character event-name admission; inherited TraceState removal; real pinned-encoder burst test for 16-record log/trace batches; Telemetry contract run `36824849414` passed on `88d3fda...` | Hosted implementation evidence GREEN; documentation-only successor recheck required |
+| Wire-safe counter totals | signed-int64 increment and canonical label-series cumulative admission with repeated-handle and concurrency tests against the pinned metric encoder; Telemetry contract run `36824849414` passed on `88d3fda...` | Hosted implementation evidence GREEN; documentation-only successor recheck required |
 | TLS 1.2 minimum on synthetic HTTPS peers | Implementation commit `9da68ea...`; security decoder tests: 8 passed | Repaired; successor exact-head CodeQL recheck required |
-| Package completeness | locked build produces wheel and sdist; sdist contains `collector/production.yaml`; Telemetry contract run `36753473023` passed on `0dec365...` | Exact-head evidence applies only to `0dec365...` |
+| Package completeness | Telemetry contract run `36824849414` on `88d3fda...` ran the locked build, produced wheel and sdist, and verified the packaged `collector/production.yaml` | Hosted implementation evidence GREEN; immutable release still absent |
 | Release and consumer adoption | no published release; Naruon migration remains external | Blocked |
 
 The runtime is Python because the supported OpenTelemetry SDK/exporter surface
@@ -117,8 +117,8 @@ other contexts use the released HTTPS contract and never query this table.
 | Priority | Gap | Action and completion evidence | Status |
 | --- | --- | --- | --- |
 | P0 | CodeQL rejected the prior head for implicit legacy-TLS flows | Require TLS 1.2 explicitly and obtain a successful CodeQL run on the successor exact head | Repair at `9da68ea...`; terminal successor verdict pending |
-| P0 | Valid SDK bursts and inherited TraceState exceeded the Collector's 65,536-byte ingress limit | Bound trace/log exports to 16 records, preserve only parent trace identity/flags, and encode worst-case admitted batches with pinned OTel in the regression suite | Repaired locally; hosted successor evidence pending |
-| P0 | Operational event names and cumulative metric-series totals could exceed OTLP wire bounds | Reject event names above 128 characters and each canonical label-series total above signed-int64 before calling the SDK; synchronize repeated handles | Repaired locally; hosted successor evidence pending |
+| P0 | Valid SDK bursts and inherited TraceState exceeded the Collector's 65,536-byte ingress limit | Bound trace/log exports to 16 records, preserve only parent trace identity/flags, and encode worst-case admitted batches with pinned OTel in the regression suite | Hosted contract `36824849414` GREEN on `88d3fda...`; CodeQL and review gates remain |
+| P0 | Operational event names and cumulative metric-series totals could exceed OTLP wire bounds | Reject event names above 128 characters and each canonical label-series total above signed-int64 before calling the SDK; synchronize repeated handles | Hosted contract `36824849414` GREEN on `88d3fda...`; CodeQL and review gates remain |
 | P0 | No independent current-head approval | Complete review after all exact-head checks; repair every actionable finding | Open |
 | P0 | No immutable release or consumer pin | Merge normally, build from protected main, publish hashes and contract evidence, then bump the consumer to the released artifact | Blocked by PR |
 | P0 | Live backend, SIEM, credential rotation, retention, and persistent-volume recovery are unverified | Run an operator-owned staging exercise with redacted evidence and rollback | Open |
