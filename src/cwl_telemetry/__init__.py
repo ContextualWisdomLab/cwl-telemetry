@@ -382,11 +382,13 @@ class TelemetryRuntime:
         from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
         parent = None
+        seen_traceparent = False
         if isinstance(headers, Mapping):
             for key, value in headers.items():
                 if type(key) is str and key.lower() == "traceparent":
-                    if parent is not None:
+                    if seen_traceparent:
                         return Context()
+                    seen_traceparent = True
                     parent = value
         if not isinstance(parent, str) or _TRACEPARENT.fullmatch(parent) is None:
             return Context()
