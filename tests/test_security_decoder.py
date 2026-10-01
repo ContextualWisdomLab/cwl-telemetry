@@ -68,7 +68,7 @@ def test_siem_sender_closes_connection_on_success_and_failure(tmp_path, monkeypa
     monkeypatch.setattr(sqlite3, "connect", tracked_connect)
     try:
         if has_outbox:
-            assert deliver_pending(outbox, gateway="https://siem.example", token="synthetic-token-12345") == 0
+            assert deliver_pending(outbox, gateway="https://siem.example", token="synthetic-token-12345") == (0, 0)
         else:
             with pytest.raises(ValueError, match="outbox is missing"):
                 deliver_pending(outbox, gateway="https://siem.example", token="synthetic-token-12345")
@@ -93,7 +93,7 @@ def test_siem_sender_expires_delivered_replay_rows_without_new_input(tmp_path):
         )
     outbox.chmod(0o600)
 
-    assert deliver_pending(outbox, gateway="https://siem.example", token="synthetic-token-12345") == 0
+    assert deliver_pending(outbox, gateway="https://siem.example", token="synthetic-token-12345") == (0, 0)
     with sqlite3.connect(outbox) as connection:
         assert connection.execute("SELECT event_id FROM security_event_outbox").fetchall() == [("b" * 32,)]
 
@@ -470,8 +470,8 @@ def test_siem_handoff_keeps_outbox_pending_until_exact_https_ack(tmp_path: Path)
         with sqlite3.connect(outbox) as connection:
             assert [row["event_id"] for row in pending_security_events(connection)] == ["b" * 32]
         mode["value"] = "ready"
-        assert deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate) == 1
-        assert deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate) == 0
+        assert deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate) == (1, 0)
+        assert deliver_pending(outbox, gateway=gateway, token=token, ca_file=certificate) == (0, 0)
         assert captured[-1][:3] == ("/v1/security-events", f"Bearer {token}", "b" * 32)
         assert json.loads(captured[-1][3])["event_name"] == "authentication.denied"
         with sqlite3.connect(outbox) as connection:
