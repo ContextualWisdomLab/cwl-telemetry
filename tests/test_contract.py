@@ -570,7 +570,7 @@ def test_w3c_trace_propagation_preserves_identity_without_baggage() -> None:
         service="svc", version="1", environment="test", source_revision="a" * 40,
     ))
     parent = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
-    context = runtime.extract_trace({"traceparent": parent, "baggage": "person@example.com"})
+    context = runtime.extract_trace({"TrAcEpArEnT": parent, "baggage": "person@example.com"})
     context = set_baggage("secret", "person@example.com", context=context)
     token = attach(context)
     try:
