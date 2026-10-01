@@ -480,3 +480,68 @@ def test_siem_handoff_keeps_outbox_pending_until_exact_https_ack(tmp_path: Path)
         server.shutdown()
         server.server_close()
         worker.join(timeout=5)
+
+def test_siem_sender_quarantines_event_rejection_and_continues(tmp_path: Path) -> None:
+    """A permanent event rejection cannot block a later valid security event."""
+    certificate = tmp_path / "gateway.crt"
+    private_key = tmp_path / "gateway.key"
+    subprocess.run([
+        "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1",
+        "-keyout", str(private_key), "-out", str(certificate), "-days", "1",
+    ], check=True, capture_output=True)
+    outbox = tmp_path / "security.sqlite"
+    first = _request()
+    second = _request()
+    second.resource_logs[0].scope_logs[0].log_records[0].attributes[5].value.string_value = "c" * 32
+    with sqlite3.connect(outbox) as connection:
+        decode_security_export(
+            first.SerializeToString(), authenticated_tenant="tenant_1",
+            replay_db=connection, now_ns=NOW,
+        )
+        decode_security_export(
+            second.SerializeToString(), authenticated_tenant="tenant_1",
+            replay_db=connection, now_ns=NOW,
+        )
+    outbox.chmod(0o600)
+
+    class Gateway(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):
+            event_id = self.headers["Idempotency-Key"]
+            self.rfile.read(int(self.headers["Content-Length"]))
+            if event_id == "b" * 32:
+                self.send_response(422)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            response = json.dumps({"accepted": True, "event_id": event_id}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+    server = HTTPServer(("127.0.0.1", 0), Gateway)
+    context = _tls_server_context()
+    context.load_cert_chain(str(certificate), str(private_key))
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    try:
+        summary = deliver_pending(
+            outbox, gateway=f"https://127.0.0.1:{server.server_port}",
+            token="synthetic-siem-token-12345", ca_file=certificate,
+        )
+        assert (summary.delivered, summary.quarantined) == (1, 1)
+        with sqlite3.connect(outbox) as connection:
+            assert connection.execute(
+                "SELECT event_id, delivered FROM security_event_outbox ORDER BY rowid"
+            ).fetchall() == [("b" * 32, 2), ("c" * 32, 1)]
+            assert pending_security_events(connection) == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=5)
