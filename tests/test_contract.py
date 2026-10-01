@@ -237,21 +237,70 @@ def test_metric_and_span_ports_reject_unbounded_attributes() -> None:
     runtime.shutdown()
 
 
-def test_counter_rejects_signed_int64_wire_and_aggregate_overflow() -> None:
-    """An increment cannot poison the cumulative OTLP metrics payload."""
-    from cwl_telemetry import TelemetryConfig, bootstrap
+def test_counter_rejects_signed_int64_wire_and_series_overflow() -> None:
+    """Repeated handles share each canonical label series' OTLP wire budget."""
+    from opentelemetry.exporter.otlp.proto.common._internal.metrics_encoder import encode_metrics
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+    from cwl_telemetry import TelemetryConfig, _MeterPort
 
-    runtime = bootstrap(TelemetryConfig(
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader], shutdown_on_exit=False)
+    meter = _MeterPort(provider.get_meter("svc", "1"), TelemetryConfig(
         service="svc", version="1", environment="test", source_revision="a" * 40,
-        metric_names=frozenset({"work_total"}),
+        metric_names=frozenset({"work_total"}), operation_codes=frozenset({"a", "b"}),
     ))
-    counter = runtime.meter.counter("work_total")
+    counter = meter.counter("work_total")
     with pytest.raises(ValueError, match="counter increment"):
         counter.add(1 << 63)
-    counter.add((1 << 63) - 1)
+    labels = {"operation_code": "a", "status": "success"}
+    counter.add((1 << 63) - 2, labels)
+    repeated_handle = meter.counter("work_total")
+    repeated_handle.add(1, {"status": "success", "operation_code": "a"})
     with pytest.raises(ValueError, match="counter increment"):
-        counter.add(1)
-    runtime.shutdown()
+        repeated_handle.add(1, labels)
+    repeated_handle.add(1, {"operation_code": "b", "status": "success"})
+    assert encode_metrics(reader.get_metrics_data()).ByteSize() > 0
+    provider.shutdown()
+
+
+def test_counter_serializes_cross_handle_series_overflow() -> None:
+    """Concurrent handles cannot race the same cumulative series past int64."""
+    from opentelemetry.sdk.metrics import MeterProvider
+    from cwl_telemetry import TelemetryConfig, _MeterPort
+
+    provider = MeterProvider(shutdown_on_exit=False)
+    meter = _MeterPort(provider.get_meter("svc", "1"), TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+        metric_names=frozenset({"work_total"}), operation_codes=frozenset({"work"}),
+    ))
+    first = meter.counter("work_total")
+    second = meter.counter("work_total")
+    labels = {"operation_code": "work"}
+    first.add((1 << 63) - 2, labels)
+    barrier = threading.Barrier(3)
+    outcomes: list[str] = []
+
+    def add_at_boundary(counter) -> None:
+        barrier.wait()
+        try:
+            counter.add(1, labels)
+        except ValueError:
+            outcomes.append("rejected")
+        else:
+            outcomes.append("accepted")
+
+    threads = [
+        threading.Thread(target=add_at_boundary, args=(first,)),
+        threading.Thread(target=add_at_boundary, args=(second,)),
+    ]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join()
+    assert sorted(outcomes) == ["accepted", "rejected"]
+    provider.shutdown()
 
 
 def test_valid_log_bursts_stay_within_collector_ingress_limit(monkeypatch) -> None:
@@ -261,11 +310,14 @@ def test_valid_log_bursts_stay_within_collector_ingress_limit(monkeypatch) -> No
     from opentelemetry.exporter.otlp.proto.http import _log_exporter
     from opentelemetry.exporter.otlp.proto.http import trace_exporter
     from opentelemetry.sdk._logs.export import LogExportResult
+    from opentelemetry.context import attach, detach
     from opentelemetry.sdk.trace.export import SpanExportResult
+    from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, TraceState, set_span_in_context
     from cwl_telemetry import TelemetryConfig, TelemetryEvent, bootstrap
 
     encoded_log_batches: list[tuple[int, int]] = []
     encoded_span_batches: list[tuple[int, int]] = []
+    exported_span_trace_states: list[int] = []
 
     class CapturingExporter:
         """Encode actual SDK batches while replacing only external HTTP delivery."""
@@ -291,6 +343,7 @@ def test_valid_log_bursts_stay_within_collector_ingress_limit(monkeypatch) -> No
 
         def export(self, batch):
             encoded_span_batches.append((len(batch), encode_spans(batch).ByteSize()))
+            exported_span_trace_states.extend(len(span.context.trace_state) for span in batch)
             return SpanExportResult.SUCCESS
 
         def shutdown(self):
@@ -330,19 +383,29 @@ def test_valid_log_bursts_stay_within_collector_ingress_limit(monkeypatch) -> No
         "http_route": "/" + "r" * 127,
         "source_location": "s" * 96 + ":9999999",
     }
-    for _ in range(128):
-        with runtime.tracer.start_as_current_span("s" * 64, attributes):
-            pass
-        runtime.emit(TelemetryEvent(
-            name="a." + "b" * 126, severity="INFO", classification="internal",
-            purpose_code="operations", kind="operational", attributes=attributes,
-        ))
+    parent = SpanContext(
+        trace_id=int("1" * 32, 16), span_id=int("2" * 16, 16), is_remote=True,
+        trace_flags=TraceFlags(1),
+        trace_state=TraceState([(f"vendor{i}", "v" * 250) for i in range(20)]),
+    )
+    token = attach(set_span_in_context(NonRecordingSpan(parent)))
+    try:
+        for _ in range(128):
+            with runtime.tracer.start_as_current_span("s" * 64, attributes):
+                pass
+            runtime.emit(TelemetryEvent(
+                name="a." + "b" * 126, severity="INFO", classification="internal",
+                purpose_code="operations", kind="operational", attributes=attributes,
+            ))
+    finally:
+        detach(token)
     runtime.shutdown()
 
     assert sum(count for count, _size in encoded_log_batches) == 128
     assert sum(count for count, _size in encoded_span_batches) == 128
     assert all(count <= 16 and size <= 65_536 for count, size in encoded_log_batches)
     assert all(count <= 16 and size <= 65_536 for count, size in encoded_span_batches)
+    assert exported_span_trace_states == [0] * 128
 
 
 def test_span_context_does_not_record_exception_content() -> None:

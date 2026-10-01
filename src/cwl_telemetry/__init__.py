@@ -265,10 +265,28 @@ class _TracerPort:
         safe = _validate_attributes(attributes or {}, _ATTRIBUTES)
         if "http_route" in safe and safe["http_route"] not in self._config.route_templates:
             raise ValueError("undeclared route template")
+
         @contextmanager
         def current_span() -> Iterator[_SpanPort]:
+            from opentelemetry.context import Context
+            from opentelemetry.trace import (
+                NonRecordingSpan, SpanContext, TraceState, get_current_span, set_span_in_context,
+            )
+
+            current = get_current_span().get_span_context()
+            parent = Context()
+            if current.is_valid:
+                admitted = SpanContext(
+                    trace_id=current.trace_id,
+                    span_id=current.span_id,
+                    is_remote=current.is_remote,
+                    trace_flags=current.trace_flags,
+                    trace_state=TraceState(),
+                )
+                parent = set_span_in_context(NonRecordingSpan(admitted), parent)
             with self._tracer.start_as_current_span(
-                name, attributes=safe, record_exception=False, set_status_on_exception=False,
+                name, context=parent, attributes=safe,
+                record_exception=False, set_status_on_exception=False,
             ) as span:
                 yield _SpanPort(span, self._config)
 
@@ -281,43 +299,52 @@ class _MeterPort:
     def __init__(self, meter: Any, config: TelemetryConfig) -> None:
         self._meter = meter
         self._config = config
+        self._counter_lock = Lock()
+        self._counters: dict[str, Any] = {}
 
     def counter(self, name: str) -> Any:
         """Return a counter with an admitted-add operation."""
         _require_match(name, _CODE, "metric name")
         if name not in self._config.metric_names:
             raise ValueError("undeclared metric name")
-        instrument = self._meter.create_counter(name)
-        config = self._config
+        with self._counter_lock:
+            if name in self._counters:
+                return self._counters[name]
+            instrument = self._meter.create_counter(name)
+            config = self._config
 
-        class Counter:
-            """Small metric Port with a fixed label vocabulary."""
+            class Counter:
+                """Small metric Port with a fixed label vocabulary."""
 
-            def __init__(self) -> None:
-                self._total = 0
-                self._lock = Lock()
+                def __init__(self) -> None:
+                    self._series_totals: dict[tuple[tuple[str, object], ...], int] = {}
+                    self._lock = Lock()
 
-            def add(self, value: int, attributes: Mapping[str, object] | None = None) -> None:
-                """Reject high-cardinality labels and wire-unsafe totals."""
-                if type(value) is not int or value < 0:
-                    raise ValueError("invalid counter increment")
-                safe = _validate_attributes(attributes or {}, _METRIC_LABELS)
-                declared = {
-                    "operation_code": config.operation_codes,
-                    "bounded_context": config.bounded_contexts,
-                    "dependency": config.dependencies,
-                    "result": _METRIC_OUTCOMES,
-                    "status": _METRIC_OUTCOMES,
-                }
-                if any(item not in declared[key] for key, item in safe.items()):
-                    raise ValueError("undeclared metric label")
-                with self._lock:
-                    if value > _MAX_COUNTER_VALUE - self._total:
+                def add(self, value: int, attributes: Mapping[str, object] | None = None) -> None:
+                    """Reject high-cardinality labels and wire-unsafe series totals."""
+                    if type(value) is not int or value < 0:
                         raise ValueError("invalid counter increment")
-                    instrument.add(value, attributes=safe)
-                    self._total += value
+                    safe = _validate_attributes(attributes or {}, _METRIC_LABELS)
+                    declared = {
+                        "operation_code": config.operation_codes,
+                        "bounded_context": config.bounded_contexts,
+                        "dependency": config.dependencies,
+                        "result": _METRIC_OUTCOMES,
+                        "status": _METRIC_OUTCOMES,
+                    }
+                    if any(item not in declared[key] for key, item in safe.items()):
+                        raise ValueError("undeclared metric label")
+                    series = tuple(sorted(safe.items()))
+                    with self._lock:
+                        total = self._series_totals.get(series, 0)
+                        if value > _MAX_COUNTER_VALUE - total:
+                            raise ValueError("invalid counter increment")
+                        instrument.add(value, attributes=safe)
+                        self._series_totals[series] = total + value
 
-        return Counter()
+            counter = Counter()
+            self._counters[name] = counter
+            return counter
 
 
 @dataclass

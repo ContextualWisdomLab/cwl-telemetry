@@ -31,10 +31,13 @@ opaque tenant reference and stable 32-hex event ID. Authoritative audit and
 domain events must use a separate durable product outbox.
 
 Operational event names are limited to 128 characters. Trace and log exporters
-send at most 16 admitted records per request so a worst-case valid batch remains
-within the production Collector's 65,536-byte ingress limit. Counter increments
-and their cumulative instrument total must remain within the nonnegative signed
-64-bit OTLP wire range; an overflow is rejected before it can poison an export.
+send at most 16 admitted records per request. The trace Port preserves an
+inherited parent's trace identity and flags but discards baggage and TraceState,
+so a worst-case admitted batch remains within the production Collector's
+65,536-byte ingress limit. Counter increments and each canonical label series'
+cumulative total must remain within the nonnegative signed 64-bit OTLP wire
+range; an overflow is rejected before it can poison an export. Repeated factory
+calls share that series accounting.
 
 ## Signal route and ownership
 
