@@ -504,7 +504,7 @@ def test_siem_sender_quarantines_event_rejection_and_continues(tmp_path: Path) -
             replay_db=connection, now_ns=NOW,
         )
     outbox.chmod(0o600)
-    rejection = {"bound": False}
+    rejection = {"value": None}
 
     class Gateway(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -515,8 +515,10 @@ def test_siem_sender_quarantines_event_rejection_and_continues(tmp_path: Path) -
             self.rfile.read(int(self.headers["Content-Length"]))
             if event_id == "b" * 32:
                 response = b""
-                if rejection["bound"]:
-                    response = json.dumps({"rejected": True, "event_id": event_id}).encode()
+                if rejection["value"] is not None:
+                    response = json.dumps({
+                        "rejected": rejection["value"], "event_id": event_id,
+                    }).encode()
                 self.send_response(422)
                 if response:
                     self.send_header("Content-Type", "application/json")
@@ -548,7 +550,19 @@ def test_siem_sender_quarantines_event_rejection_and_continues(tmp_path: Path) -
                 "b" * 32, "c" * 32,
             ]
 
-        rejection["bound"] = True
+        for non_boolean_rejection in (1, 1.0):
+            rejection["value"] = non_boolean_rejection
+            with pytest.raises(HTTPError):
+                deliver_pending(
+                    outbox, gateway=f"https://127.0.0.1:{server.server_port}",
+                    token="synthetic-siem-token-12345", ca_file=certificate,
+                )
+            with sqlite3.connect(outbox) as connection:
+                assert [row["event_id"] for row in pending_security_events(connection)] == [
+                    "b" * 32, "c" * 32,
+                ]
+
+        rejection["value"] = True
         summary = deliver_pending(
             outbox, gateway=f"https://127.0.0.1:{server.server_port}",
             token="synthetic-siem-token-12345", ca_file=certificate,

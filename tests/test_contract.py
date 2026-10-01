@@ -82,11 +82,20 @@ def test_reserved_security_name_cannot_bypass_durable_route() -> None:
     """A reserved security event name cannot be downgraded to operational."""
     from cwl_telemetry import TelemetryEvent, validate_event
 
-    with pytest.raises(ValueError, match="security event"):
-        validate_event(TelemetryEvent(
-            name="authentication.denied", severity="INFO", classification="internal",
-            purpose_code="operations", kind="operational",
-        ))
+    class UnequalSecurityName(str):
+        """Retain text while trying to evade a finite-vocabulary equality check."""
+
+        __hash__ = str.__hash__
+
+        def __eq__(self, _other):
+            return False
+
+    for name in ("authentication.denied", UnequalSecurityName("authentication.denied")):
+        with pytest.raises(ValueError, match="event name|security event"):
+            validate_event(TelemetryEvent(
+                name=name, severity="INFO", classification="internal",
+                purpose_code="operations", kind="operational",
+            ))
 
 
 def test_security_attributes_are_snapshotted_once_before_export() -> None:
