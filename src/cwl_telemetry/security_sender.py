@@ -122,7 +122,10 @@ def deliver_pending(
                 rejection = _gateway_document(error)
                 error.close()
                 if (status_code in _PERMANENT_EVENT_REJECTION_CODES
-                        and rejection == {"rejected": True, "event_id": event_id}):
+                        and rejection is not None
+                        and rejection.keys() == {"rejected", "event_id"}
+                        and rejection["rejected"] is True
+                        and rejection["event_id"] == event_id):
                     _quarantine_security_event(connection, event_id)
                     quarantined += 1
                     continue

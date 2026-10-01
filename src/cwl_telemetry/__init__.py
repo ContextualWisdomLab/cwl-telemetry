@@ -188,16 +188,16 @@ def _validated_event_attributes(event: TelemetryEvent) -> dict[str, object]:
     """Validate an event and return its single admitted attribute snapshot."""
     if not isinstance(event, TelemetryEvent):
         raise ValueError("invalid telemetry event")
-    if not isinstance(event.name, str) or len(event.name) > _MAX_EVENT_NAME_LENGTH:
+    if type(event.name) is not str or len(event.name) > _MAX_EVENT_NAME_LENGTH:
         raise ValueError("invalid event name")
     _require_match(event.name, _EVENT, "event name")
-    if event.severity not in _SEVERITIES:
+    if type(event.severity) is not str or event.severity not in _SEVERITIES:
         raise ValueError("invalid severity")
-    if event.classification not in _CLASSIFICATIONS:
+    if type(event.classification) is not str or event.classification not in _CLASSIFICATIONS:
         raise ValueError("invalid classification")
-    if event.purpose_code not in _PURPOSES:
+    if type(event.purpose_code) is not str or event.purpose_code not in _PURPOSES:
         raise ValueError("invalid purpose")
-    if event.kind not in ("operational", "security"):
+    if type(event.kind) is not str or event.kind not in ("operational", "security"):
         raise ValueError("invalid signal kind")
     if event.name in _SECURITY_EVENTS and event.kind != "security":
         raise ValueError("security event requires security kind")
