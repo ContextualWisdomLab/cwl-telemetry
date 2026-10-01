@@ -4,7 +4,7 @@ Status: Proposed
 
 Implementation evidence: successor TDD repair on PR #1; immutable exact head is recorded in the PR after publication
 
-Last reviewed RED head: `3128e22cec277ae91eb46fe1c7533a20adf65319`
+Last reviewed RED head: `c59c4a92846feb3aa84ab9f9ea6f5df0c34e3073`
 
 Release state: no immutable release; consumers must not adopt this branch
 
@@ -41,8 +41,8 @@ A release candidate is acceptable only when:
 | Authenticated TLS OTLP ingress and route separation | `collector/production.yaml`; pinned real-Collector tests | Implemented; deployment unverified |
 | Tenant-bound normalized security projection | `decode_security_export`; hostile-record tests | Implemented in Proposed PR |
 | Durable idempotency and exact acknowledgement | `security_event_outbox`; `deliver_pending`; failure-injection tests | Implemented in Proposed PR |
-| Security-route integrity | reserved security names require security kind/purpose/IDs; one immutable attribute snapshot is admitted and exported | Repaired locally; hosted successor recheck required |
-| Poison-event isolation without false delivery | exact-ID JSON `400`/`422` rejection contract; pending+quarantine shared capacity; later-row delivery regression | Repaired locally; hosted successor recheck required |
+| Security-route integrity | exact built-in string fields; reserved security names require security kind/purpose/IDs; one immutable attribute snapshot is admitted and exported | Repaired locally; hosted successor recheck required |
+| Poison-event isolation without false delivery | exact-ID and exact-Boolean JSON `400`/`422` rejection contract; pending+quarantine shared capacity; later-row delivery regression | Repaired locally; hosted successor recheck required |
 | Bounded OTLP record and batch size | 128-character event-name admission; inherited TraceState removal; real pinned-encoder burst test for 16-record log/trace batches; exact-head Telemetry contract run `36840633246` passed on `7fd6c43...` | Hosted implementation evidence GREEN; successor repair recheck required |
 | Wire-safe counter totals | signed-int64 increment and canonical label-series cumulative admission with repeated-handle and concurrency tests against the pinned metric encoder; exact-head Telemetry contract run `36840633246` passed on `7fd6c43...` | Hosted implementation evidence GREEN; successor repair recheck required |
 | TLS 1.2 minimum on synthetic HTTPS peers | Implementation commit `9da68ea...`; security decoder tests: 8 passed | Repaired; successor exact-head CodeQL recheck required |
@@ -128,8 +128,8 @@ other contexts use the released HTTPS contract and never query this table.
 | P0 | CodeQL rejected the prior head for implicit legacy-TLS flows | Require TLS 1.2 explicitly and obtain a successful CodeQL run on the successor exact head | Repair at `9da68ea...`; terminal successor verdict pending |
 | P0 | Valid SDK bursts and inherited TraceState exceeded the Collector's 65,536-byte ingress limit | Bound trace/log exports to 16 records, preserve only parent trace identity/flags, and encode worst-case admitted batches with pinned OTel in the regression suite | Exact-head contract `36840633246` GREEN on `7fd6c43...`; successor repair, CodeQL, and review gates remain |
 | P0 | Operational event names and cumulative metric-series totals could exceed OTLP wire bounds | Reject event names above 128 characters and each canonical label-series total above signed-int64 before calling the SDK; synchronize repeated handles | Exact-head contract `36840633246` GREEN on `7fd6c43...`; successor repair, CodeQL, and review gates remain |
-| P0 | A generic `400`/`422` could falsely quarantine an event, while quarantine rows bypassed capacity | Require exact-ID rejection JSON, retain ambiguous failures as pending, and count pending+quarantine rows against one capacity | RED head `3128e22...`; local successor tests GREEN; hosted successor recheck required |
-| P0 | Reserved security names could be downgraded to operational, and repeated mutable `Mapping` reads could remove required IDs after admission | Enforce the inverse name/kind invariant and export the single validated attribute snapshot | RED head `3128e22...`; local successor tests GREEN; hosted successor recheck required |
+| P0 | A generic or non-Boolean `400`/`422` rejection could falsely quarantine an event, while quarantine rows bypassed capacity | Require exact-ID and exact-Boolean rejection JSON, retain ambiguous failures as pending, and count pending+quarantine rows against one capacity | RED heads `3128e22...` and `c59c4a9...`; local successor tests GREEN; hosted successor recheck required |
+| P0 | Reserved security names could be downgraded to operational through ordinary or subclassed strings, and repeated mutable `Mapping` reads could remove required IDs after admission | Require exact built-in string fields, enforce the inverse name/kind invariant, and export the single validated attribute snapshot | RED heads `3128e22...` and `c59c4a9...`; local successor tests GREEN; hosted successor recheck required |
 | P0 | Ambient OTel sampler, span-limit, or SDK-disable variables could silently drop or truncate explicitly admitted telemetry | Own sampler and span limits in bootstrap; reject ambient global disable | RED head `3128e22...`; local successor tests GREEN; hosted successor recheck required |
 | P0 | No independent current-head approval | Complete review after all exact-head checks; repair every actionable finding | Open |
 | P0 | No immutable release or consumer pin | Merge normally, build from protected main, publish hashes and contract evidence, then bump the consumer to the released artifact | Blocked by PR |
