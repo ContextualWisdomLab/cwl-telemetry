@@ -90,15 +90,21 @@ python -m cwl_telemetry.security_sender \
 The sender posts one normalized JSON event to `/v1/security-events` with its
 event ID as an idempotency key. It marks the outbox row delivered only after a
 `200 application/json` acknowledgement containing exactly
-`{"accepted": true, "event_id": "<same ID>"}`. Failed TLS, HTTP, redirect,
-or acknowledgement leaves the row pending for the next operator-scheduled run.
-Each sender run also removes acknowledged replay rows older than seven days,
-even when no new security event arrives; the operator schedule must keep running
-to enforce that local expiry during idle periods. Unacknowledged rows remain.
-The gateway must honor idempotency because an acknowledgement can be lost after
-it accepts an event. A compatible approved destination, operator schedule,
-retention policy, and live SIEM acknowledgement are still unverified. The
-receiver cannot execute a domain command or change authorization.
+`{"accepted": true, "event_id": "<same ID>"}`. An authenticated `400` or
+`422` rejects that event permanently: the sender retains it with quarantine
+state `2`, continues with later rows, reports the quarantine count, and exits
+with status `2` so operators must investigate. Network, TLS, redirect,
+`401`, `403`, `404`, `408`, `409`, `429`, 5xx, and malformed or
+mismatched acknowledgements remain pending and fail closed because acceptance
+or operator configuration is not safely known. Each sender run also removes
+acknowledged replay rows older than seven days, even when no new security event
+arrives; the operator schedule must keep running to enforce that local expiry
+during idle periods. Quarantined rows remain for operator evidence and are not
+reported as delivered. The gateway must honor idempotency because an
+acknowledgement can be lost after it accepts an event. A compatible approved
+destination, operator schedule, retention policy, quarantine runbook, and live
+SIEM acknowledgement are still unverified. The receiver cannot execute a
+domain command or change authorization.
 
 If the Collector is unavailable, product transactions continue and the SDK's
 bounded queue may drop old operational signals. When the Collector's backend
