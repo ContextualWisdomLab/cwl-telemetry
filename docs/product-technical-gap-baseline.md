@@ -4,7 +4,7 @@ Status: Proposed
 
 Implementation evidence: successor TDD repair on PR #1; immutable exact head is recorded in the PR after publication
 
-Last reviewed predecessor head: `ab81a4d4d7b0754ec1064c2862a2fe27b69338b5`
+Last reviewed RED head: `fa15c189ee6dac785c606d0784ae618942060d9a`
 
 Release state: no immutable release; consumers must not adopt this branch
 
@@ -41,6 +41,7 @@ A release candidate is acceptable only when:
 | Authenticated TLS OTLP ingress and route separation | `collector/production.yaml`; pinned real-Collector tests | Implemented; deployment unverified |
 | Tenant-bound normalized security projection | `decode_security_export`; hostile-record tests | Implemented in Proposed PR |
 | Durable idempotency and exact acknowledgement | `security_event_outbox`; `deliver_pending`; failure-injection tests | Implemented in Proposed PR |
+| Poison-event isolation without false delivery | authenticated event-specific `400`/`422` quarantine; later-row delivery regression | Repaired in Proposed PR; hosted successor recheck required |
 | Bounded OTLP record and batch size | 128-character event-name admission; inherited TraceState removal; real pinned-encoder burst test for 16-record log/trace batches; Telemetry contract run `36824849414` passed on `88d3fda...` | Hosted implementation evidence GREEN; documentation-only successor recheck required |
 | Wire-safe counter totals | signed-int64 increment and canonical label-series cumulative admission with repeated-handle and concurrency tests against the pinned metric encoder; Telemetry contract run `36824849414` passed on `88d3fda...` | Hosted implementation evidence GREEN; documentation-only successor recheck required |
 | TLS 1.2 minimum on synthetic HTTPS peers | Implementation commit `9da68ea...`; security decoder tests: 8 passed | Repaired; successor exact-head CodeQL recheck required |
@@ -91,9 +92,11 @@ sequenceDiagram
     D->>O: Mark delivered
 ```
 
-Failure invariant: TLS, HTTP, redirect, malformed acknowledgement, process
-restart, or duplicate delivery cannot mark a pending row delivered. A reused
-event ID with different content is rejected.
+Failure invariant: TLS, redirect, retryable or configuration HTTP failures,
+malformed acknowledgement, process restart, or duplicate delivery cannot mark a
+pending row delivered. Authenticated event-specific `400`/`422` rejections move
+to retained quarantine state `2` without blocking later rows. A reused event ID
+with different content is rejected.
 
 ## ERD: owned persistence
 
@@ -107,6 +110,10 @@ erDiagram
     }
 ```
 
+Delivery state `0` is pending, `1` is acknowledged, and `2` is quarantined
+after an authenticated event-specific permanent rejection. Quarantine is not
+delivery and is retained for operator investigation.
+
 This is a single normalized aggregate boundary: one immutable event payload and
 its delivery state. The database is private to the security-consumer subsystem
 and is shared only by its receiver and operator-scheduled sender processes;
@@ -119,6 +126,7 @@ other contexts use the released HTTPS contract and never query this table.
 | P0 | CodeQL rejected the prior head for implicit legacy-TLS flows | Require TLS 1.2 explicitly and obtain a successful CodeQL run on the successor exact head | Repair at `9da68ea...`; terminal successor verdict pending |
 | P0 | Valid SDK bursts and inherited TraceState exceeded the Collector's 65,536-byte ingress limit | Bound trace/log exports to 16 records, preserve only parent trace identity/flags, and encode worst-case admitted batches with pinned OTel in the regression suite | Hosted contract `36824849414` GREEN on `88d3fda...`; CodeQL and review gates remain |
 | P0 | Operational event names and cumulative metric-series totals could exceed OTLP wire bounds | Reject event names above 128 characters and each canonical label-series total above signed-int64 before calling the SDK; synchronize repeated handles | Hosted contract `36824849414` GREEN on `88d3fda...`; CodeQL and review gates remain |
+| P0 | One permanently rejected SIEM event could block every later outbox row | Quarantine authenticated event-specific `400`/`422`, retain ambiguous failures as pending, continue later rows, report the count, and require operator attention | RED run `36840143222`: 1 failed/31 passed; successor hosted recheck required |
 | P0 | No independent current-head approval | Complete review after all exact-head checks; repair every actionable finding | Open |
 | P0 | No immutable release or consumer pin | Merge normally, build from protected main, publish hashes and contract evidence, then bump the consumer to the released artifact | Blocked by PR |
 | P0 | Live backend, SIEM, credential rotation, retention, and persistent-volume recovery are unverified | Run an operator-owned staging exercise with redacted evidence and rollback | Open |
