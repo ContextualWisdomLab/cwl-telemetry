@@ -176,3 +176,15 @@ def mark_security_delivered(replay_db: sqlite3.Connection, event_id: str) -> Non
         ).rowcount
     if changed != 1:
         raise ValueError("unknown or already delivered security event")
+
+
+def _quarantine_security_event(replay_db: sqlite3.Connection, event_id: str) -> None:
+    """Retain one permanently rejected row outside the pending delivery queue."""
+    _ensure_outbox(replay_db)
+    with replay_db:
+        changed = replay_db.execute(
+            "UPDATE security_event_outbox SET delivered = 2 WHERE event_id = ? AND delivered = 0",
+            (event_id,),
+        ).rowcount
+    if changed != 1:
+        raise ValueError("unknown or already handled security event")
