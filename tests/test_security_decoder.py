@@ -504,6 +504,7 @@ def test_siem_sender_quarantines_event_rejection_and_continues(tmp_path: Path) -
             replay_db=connection, now_ns=NOW,
         )
     outbox.chmod(0o600)
+    rejection = {"bound": False}
 
     class Gateway(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -513,9 +514,15 @@ def test_siem_sender_quarantines_event_rejection_and_continues(tmp_path: Path) -
             event_id = self.headers["Idempotency-Key"]
             self.rfile.read(int(self.headers["Content-Length"]))
             if event_id == "b" * 32:
+                response = b""
+                if rejection["bound"]:
+                    response = json.dumps({"rejected": True, "event_id": event_id}).encode()
                 self.send_response(422)
-                self.send_header("Content-Length", "0")
+                if response:
+                    self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response)))
                 self.end_headers()
+                self.wfile.write(response)
                 return
             response = json.dumps({"accepted": True, "event_id": event_id}).encode()
             self.send_response(200)
@@ -531,6 +538,17 @@ def test_siem_sender_quarantines_event_rejection_and_continues(tmp_path: Path) -
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     try:
+        with pytest.raises(HTTPError):
+            deliver_pending(
+                outbox, gateway=f"https://127.0.0.1:{server.server_port}",
+                token="synthetic-siem-token-12345", ca_file=certificate,
+            )
+        with sqlite3.connect(outbox) as connection:
+            assert [row["event_id"] for row in pending_security_events(connection)] == [
+                "b" * 32, "c" * 32,
+            ]
+
+        rejection["bound"] = True
         summary = deliver_pending(
             outbox, gateway=f"https://127.0.0.1:{server.server_port}",
             token="synthetic-siem-token-12345", ca_file=certificate,
@@ -541,6 +559,14 @@ def test_siem_sender_quarantines_event_rejection_and_continues(tmp_path: Path) -
                 "SELECT event_id, delivered FROM security_event_outbox ORDER BY rowid"
             ).fetchall() == [("b" * 32, 2), ("c" * 32, 1)]
             assert pending_security_events(connection) == []
+
+            third = _request()
+            third.resource_logs[0].scope_logs[0].log_records[0].attributes[5].value.string_value = "d" * 32
+            with pytest.raises(ValueError, match="outbox full"):
+                decode_security_export(
+                    third.SerializeToString(), authenticated_tenant="tenant_1",
+                    replay_db=connection, now_ns=NOW, max_pending=1,
+                )
     finally:
         server.shutdown()
         server.server_close()

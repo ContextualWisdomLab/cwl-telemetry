@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import threading
+from collections.abc import Mapping
 
 import pytest
 
@@ -76,6 +78,61 @@ def test_event_admission_rejects_raw_secrets_pii_and_unknown_fields() -> None:
             ))
 
 
+def test_reserved_security_name_cannot_bypass_durable_route() -> None:
+    """A reserved security event name cannot be downgraded to operational."""
+    from cwl_telemetry import TelemetryEvent, validate_event
+
+    with pytest.raises(ValueError, match="security event"):
+        validate_event(TelemetryEvent(
+            name="authentication.denied", severity="INFO", classification="internal",
+            purpose_code="operations", kind="operational",
+        ))
+
+
+def test_security_attributes_are_snapshotted_once_before_export() -> None:
+    """Admission and export must use the same immutable attribute snapshot."""
+    from cwl_telemetry import TelemetryConfig, TelemetryEvent, bootstrap
+
+    class OneShotAttributes(Mapping):
+        def __init__(self) -> None:
+            self.data = {"tenant_ref": "tenant_1", "event_id": "a" * 32}
+            self.item_reads = 0
+
+        def __getitem__(self, key):
+            return self.data[key]
+
+        def __iter__(self):
+            return iter(self.data)
+
+        def __len__(self):
+            return len(self.data)
+
+        def items(self):
+            self.item_reads += 1
+            return self.data.items() if self.item_reads == 1 else {}.items()
+
+    captured = []
+
+    class CapturingLogger:
+        def emit(self, **fields):
+            captured.append(fields)
+
+    attributes = OneShotAttributes()
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+    ))
+    runtime.logger._logger = CapturingLogger()
+    runtime.emit(TelemetryEvent(
+        name="authentication.denied", severity="WARN", classification="internal",
+        purpose_code="security_investigation", kind="security", attributes=attributes,
+    ))
+    runtime.shutdown()
+
+    assert attributes.item_reads == 1
+    assert captured[0]["attributes"]["event_id"] == "a" * 32
+    assert captured[0]["attributes"]["tenant_ref"] == "tenant_1"
+
+
 def test_event_name_is_bounded_before_export() -> None:
     """An operational event name cannot exceed the bounded OTLP record contract."""
     from cwl_telemetry import TelemetryEvent, validate_event
@@ -110,6 +167,45 @@ def test_bootstrap_is_explicit_and_product_work_completes() -> None:
         purpose_code="operations", kind="operational", attributes={"operation_code": "work"},
     ))
     runtime.shutdown()
+
+
+def test_bootstrap_sampling_is_not_changed_by_process_environment() -> None:
+    """The explicit runtime must not silently inherit process-wide sampling."""
+    code = """
+from cwl_telemetry import TelemetryConfig, bootstrap
+runtime = bootstrap(TelemetryConfig(
+    service='svc', version='1', environment='test', source_revision='a' * 40,
+))
+with runtime.tracer.start_as_current_span('work') as span:
+    assert span._span.is_recording()
+    span.set_attribute('operation_code', 'work')
+    assert span._span.attributes['operation_code'] == 'work'
+runtime.shutdown()
+"""
+    environment = {
+        **os.environ,
+        "OTEL_TRACES_SAMPLER": "always_off",
+        "OTEL_TRACES_SAMPLER_ARG": "0",
+        "OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT": "1",
+    }
+    subprocess.run([sys.executable, "-c", code], env=environment, check=True)
+
+
+def test_bootstrap_rejects_ambient_sdk_disable() -> None:
+    """An explicit bootstrap cannot silently become a disabled no-op runtime."""
+    code = """
+from cwl_telemetry import TelemetryConfig, bootstrap
+try:
+    bootstrap(TelemetryConfig(
+        service='svc', version='1', environment='test', source_revision='a' * 40,
+    ))
+except ValueError as error:
+    assert 'OTEL_SDK_DISABLED' in str(error)
+else:
+    raise AssertionError('ambient SDK disable was silently accepted')
+"""
+    environment = {**os.environ, "OTEL_SDK_DISABLED": "true"}
+    subprocess.run([sys.executable, "-c", code], env=environment, check=True)
 
 
 def test_logger_failure_does_not_fail_work_but_invalid_event_does() -> None:
