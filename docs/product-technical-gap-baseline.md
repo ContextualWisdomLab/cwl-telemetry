@@ -4,7 +4,7 @@ Status: Proposed
 
 Implementation evidence: successor TDD repair on PR #1; immutable exact head is recorded in the PR after publication
 
-Last reviewed RED head: `c59c4a92846feb3aa84ab9f9ea6f5df0c34e3073`
+Last reviewed RED head: `0b324f9f1ac1810502deb9e9007d96fc6a8a11ae`
 
 Release state: no immutable release; consumers must not adopt this branch
 
@@ -128,9 +128,9 @@ other contexts use the released HTTPS contract and never query this table.
 | P0 | CodeQL rejected the prior head for implicit legacy-TLS flows | Require TLS 1.2 explicitly and obtain a successful CodeQL run on the successor exact head | Repair at `9da68ea...`; terminal successor verdict pending |
 | P0 | Valid SDK bursts and inherited TraceState exceeded the Collector's 65,536-byte ingress limit | Bound trace/log exports to 16 records, preserve only parent trace identity/flags, and encode worst-case admitted batches with pinned OTel in the regression suite | Exact-head contract `36840633246` GREEN on `7fd6c43...`; successor repair, CodeQL, and review gates remain |
 | P0 | Operational event names and cumulative metric-series totals could exceed OTLP wire bounds | Reject event names above 128 characters and each canonical label-series total above signed-int64 before calling the SDK; synchronize repeated handles | Exact-head contract `36840633246` GREEN on `7fd6c43...`; successor repair, CodeQL, and review gates remain |
-| P0 | A generic or non-Boolean `400`/`422` rejection could falsely quarantine an event, while quarantine rows bypassed capacity | Require exact-ID and exact-Boolean rejection JSON, retain ambiguous failures as pending, and count pending+quarantine rows against one capacity | RED heads `3128e22...` and `c59c4a9...`; local successor tests GREEN; hosted successor recheck required |
-| P0 | Reserved security names could be downgraded to operational through ordinary or subclassed strings, and repeated mutable `Mapping` reads could remove required IDs after admission | Require exact built-in string fields, enforce the inverse name/kind invariant, and export the single validated attribute snapshot | RED heads `3128e22...` and `c59c4a9...`; local successor tests GREEN; hosted successor recheck required |
-| P0 | Ambient OTel sampler, span-limit, or SDK-disable variables could silently drop or truncate explicitly admitted telemetry | Own sampler and span limits in bootstrap; reject ambient global disable | RED head `3128e22...`; local successor tests GREEN; hosted successor recheck required |
+| P0 | A generic or non-Boolean `400`/`422` rejection could falsely quarantine an event, while quarantine rows bypassed capacity | Require exact-ID and exact-Boolean rejection JSON, retain ambiguous failures as pending, and count pending+quarantine rows against one capacity | RED heads `83284cc...` and `0b324f9...`; local successor tests GREEN; hosted successor recheck required |
+| P0 | Reserved security names could be downgraded to operational through ordinary or subclassed strings, and repeated mutable `Mapping` reads could remove required IDs after admission | Require exact built-in string fields, enforce the inverse name/kind invariant, and export the single validated attribute snapshot | RED heads `83284cc...` and `0b324f9...`; local successor tests GREEN; hosted successor recheck required |
+| P0 | Ambient OTel sampler, span-limit, or SDK-disable variables could silently drop or truncate explicitly admitted telemetry | Own sampler and span limits in bootstrap; reject ambient global disable | RED head `83284cc...`; local successor tests GREEN; hosted successor recheck required |
 | P0 | No independent current-head approval | Complete review after all exact-head checks; repair every actionable finding | Open |
 | P0 | No immutable release or consumer pin | Merge normally, build from protected main, publish hashes and contract evidence, then bump the consumer to the released artifact | Blocked by PR |
 | P0 | Live backend, SIEM, credential rotation, retention, and persistent-volume recovery are unverified | Run an operator-owned staging exercise with redacted evidence and rollback | Open |
