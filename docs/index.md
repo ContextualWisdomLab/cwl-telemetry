@@ -12,7 +12,7 @@ authorization, and credential rotation. They may adopt this package only after
 an immutable release and consumer parity tests are available; this repository's
 current implementation is still under review.
 
-See the [repository README](../README.md) for the API example, signal ownership
+See the [repository README](https://github.com/ContextualWisdomLab/cwl-telemetry#readme) for the API example, signal ownership
 matrix, degraded-mode behavior, security receiver contract, and release gates.
 The [product and technical Gap baseline](product-technical-gap-baseline.md)
 records the Proposed PRD/TRD, Context Map, UML, ERD, evidence, and open actions.
