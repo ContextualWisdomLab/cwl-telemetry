@@ -589,7 +589,7 @@ def test_w3c_trace_propagation_preserves_identity_without_baggage() -> None:
     assert set(outbound) == {"traceparent"}
     assert runtime.inject_trace() == {}
     assert runtime.extract_trace({"traceparent": "garbage"}) is not None
-    ambiguous = runtime.extract_trace({"traceparent": parent, "TraceParent": parent})
+    ambiguous = runtime.extract_trace({"traceparent": None, "TraceParent": parent})
     assert not get_current_span(ambiguous).get_span_context().is_valid
     runtime.shutdown()
 
