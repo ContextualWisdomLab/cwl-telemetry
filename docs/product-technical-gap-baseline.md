@@ -2,9 +2,9 @@
 
 Status: Proposed
 
-Implementation evidence: successor TDD repair on PR #1; immutable exact head is recorded in the PR after publication
+Implementation evidence: hosted implementation checks are GREEN on PR #1 predecessor head `782445aadd6bb2ef3efe7bd688785d1fdb0588f5`; the PR records the latest exact head and its checks
 
-Last reviewed RED head: `0b324f9f1ac1810502deb9e9007d96fc6a8a11ae`
+Last reviewed implementation head: `782445aadd6bb2ef3efe7bd688785d1fdb0588f5` (`Telemetry contract` 36880180730, `Security Scan` 36880180408, `SAST Semgrep` 36880180583, and `CodeQL PR` 36880180318 all succeeded)
 
 Release state: no immutable release; consumers must not adopt this branch
 
@@ -36,18 +36,18 @@ A release candidate is acceptable only when:
 
 | Requirement | Exact evidence | Status |
 | --- | --- | --- |
-| Explicit, inert bootstrap | hostile ambient OTel subprocess tests; explicit sampler and span limits; fail-closed SDK-disable admission | Repaired locally; hosted successor recheck required |
+| Explicit, inert bootstrap | hostile ambient OTel subprocess tests; explicit sampler and span limits; fail-closed SDK-disable admission | Hosted implementation evidence GREEN on `782445a...` / 36880180730 |
 | Finite field and security-event vocabulary | `TelemetryConfig`, `TelemetryEvent`, `validate_event` | Implemented in Proposed PR |
 | Authenticated TLS OTLP ingress and route separation | `collector/production.yaml`; pinned real-Collector tests | Implemented; deployment unverified |
 | Tenant-bound normalized security projection | `decode_security_export`; hostile-record tests | Implemented in Proposed PR |
 | Durable idempotency and exact acknowledgement | `security_event_outbox`; `deliver_pending`; failure-injection tests | Implemented in Proposed PR |
-| Security-route integrity | exact built-in string fields; reserved security names require security kind/purpose/IDs; one immutable attribute snapshot is admitted and exported | Repaired locally; hosted successor recheck required |
-| Poison-event isolation without false delivery | exact-ID and exact-Boolean JSON `400`/`422` rejection contract; pending+quarantine shared capacity; later-row delivery regression | Repaired locally; hosted successor recheck required |
-| W3C trace correlation | mixed-case `traceparent` regression; duplicate case variants fail closed; baggage and TraceState are discarded | Repaired locally; hosted successor recheck required |
-| Bounded OTLP record and batch size | 128-character event-name admission; inherited TraceState removal; real pinned-encoder burst test for 16-record log/trace batches; exact-head Telemetry contract run `36840633246` passed on `7fd6c43...` | Hosted implementation evidence GREEN; successor repair recheck required |
-| Wire-safe counter totals | signed-int64 increment and canonical label-series cumulative admission with repeated-handle and concurrency tests against the pinned metric encoder; exact-head Telemetry contract run `36840633246` passed on `7fd6c43...` | Hosted implementation evidence GREEN; successor repair recheck required |
-| TLS 1.2 minimum on synthetic HTTPS peers | Implementation commit `9da68ea...`; security decoder tests: 8 passed | Repaired; successor exact-head CodeQL recheck required |
-| Package completeness | Telemetry contract run `36824849414` on `88d3fda...` ran the locked build, produced wheel and sdist, and verified the packaged `collector/production.yaml` | Hosted implementation evidence GREEN; immutable release still absent |
+| Security-route integrity | exact built-in string fields; reserved security names require security kind/purpose/IDs; one immutable attribute snapshot is admitted and exported | Hosted implementation evidence GREEN on `782445a...` / 36880180730 |
+| Poison-event isolation without false delivery | exact-ID and exact-Boolean JSON `400`/`422` rejection contract; pending+quarantine shared capacity; later-row delivery regression | Hosted implementation evidence GREEN on `782445a...` / 36880180730 |
+| W3C trace correlation | mixed-case `traceparent` regression; duplicate case variants fail closed; baggage and TraceState are discarded | Hosted implementation evidence GREEN on `782445a...` / 36880180730 |
+| Bounded OTLP record and batch size | 128-character event-name admission; inherited TraceState removal; real pinned-encoder burst test for 16-record log/trace batches | Hosted implementation evidence GREEN on `782445a...` / 36880180730 |
+| Wire-safe counter totals | signed-int64 increment and canonical label-series cumulative admission with repeated-handle and concurrency tests against the pinned metric encoder | Hosted implementation evidence GREEN on `782445a...` / 36880180730 |
+| TLS 1.2 minimum on synthetic HTTPS peers | Implementation commit `9da68ea...`; security decoder tests; CodeQL PR run 36880180318 | Hosted implementation and CodeQL evidence GREEN on `782445a...` |
+| Package completeness | Telemetry contract run 36880180730 on `782445a...` ran the locked build, produced wheel and sdist, and verified packaged `collector/production.yaml` | Hosted implementation evidence GREEN; immutable release still absent |
 | Release and consumer adoption | no published release; Naruon migration remains external | Blocked |
 
 The runtime is Python because the supported OpenTelemetry SDK/exporter surface
@@ -126,13 +126,13 @@ other contexts use the released HTTPS contract and never query this table.
 
 | Priority | Gap | Action and completion evidence | Status |
 | --- | --- | --- | --- |
-| P0 | CodeQL rejected the prior head for implicit legacy-TLS flows | Require TLS 1.2 explicitly and obtain a successful CodeQL run on the successor exact head | Repair at `9da68ea...`; terminal successor verdict pending |
-| P0 | Valid SDK bursts and inherited TraceState exceeded the Collector's 65,536-byte ingress limit | Bound trace/log exports to 16 records, preserve only parent trace identity/flags, and encode worst-case admitted batches with pinned OTel in the regression suite | Exact-head contract `36840633246` GREEN on `7fd6c43...`; successor repair, CodeQL, and review gates remain |
-| P0 | Operational event names and cumulative metric-series totals could exceed OTLP wire bounds | Reject event names above 128 characters and each canonical label-series total above signed-int64 before calling the SDK; synchronize repeated handles | Exact-head contract `36840633246` GREEN on `7fd6c43...`; successor repair, CodeQL, and review gates remain |
-| P0 | A generic or non-Boolean `400`/`422` rejection could falsely quarantine an event, while quarantine rows bypassed capacity | Require exact-ID and exact-Boolean rejection JSON, retain ambiguous failures as pending, and count pending+quarantine rows against one capacity | RED heads `83284cc...` and `0b324f9...`; local successor tests GREEN; hosted successor recheck required |
-| P0 | Reserved security names could be downgraded to operational through ordinary or subclassed strings, and repeated mutable `Mapping` reads could remove required IDs after admission | Require exact built-in string fields, enforce the inverse name/kind invariant, and export the single validated attribute snapshot | RED heads `83284cc...` and `0b324f9...`; local successor tests GREEN; hosted successor recheck required |
-| P0 | Ambient OTel sampler, span-limit, or SDK-disable variables could silently drop or truncate explicitly admitted telemetry | Own sampler and span limits in bootstrap; reject ambient global disable | RED head `83284cc...`; local successor tests GREEN; hosted successor recheck required |
-| P1 | Mixed-case HTTP `traceparent` fields lost valid parent identity, while a value-dependent duplicate sentinel was order-sensitive | Match the field name case-insensitively while rejecting duplicate case variants independently of value | RED commits `5c74077...` and `3aa86f2...`; hosted successor recheck required |
+| P0 | CodeQL rejected a prior head for implicit legacy-TLS flows | Require TLS 1.2 explicitly and obtain a successful CodeQL run on the successor exact head | Repaired; CodeQL PR 36880180318 GREEN on `782445a...` |
+| P0 | Valid SDK bursts and inherited TraceState exceeded the Collector's 65,536-byte ingress limit | Bound trace/log exports to 16 records, preserve only parent trace identity/flags, and encode worst-case admitted batches with pinned OTel in the regression suite | Implementation GREEN on `782445a...` / 36880180730; independent approval and release remain |
+| P0 | Operational event names and cumulative metric-series totals could exceed OTLP wire bounds | Reject event names above 128 characters and each canonical label-series total above signed-int64 before calling the SDK; synchronize repeated handles | Implementation GREEN on `782445a...` / 36880180730; independent approval and release remain |
+| P0 | A generic or non-Boolean `400`/`422` rejection could falsely quarantine an event, while quarantine rows bypassed capacity | Require exact-ID and exact-Boolean rejection JSON, retain ambiguous failures as pending, and count pending+quarantine rows against one capacity | Hosted implementation evidence GREEN on `782445a...` / 36880180730 |
+| P0 | Reserved security names could be downgraded to operational through ordinary or subclassed strings, and repeated mutable `Mapping` reads could remove required IDs after admission | Require exact built-in string fields, enforce the inverse name/kind invariant, and export the single validated attribute snapshot | Hosted implementation evidence GREEN on `782445a...` / 36880180730 |
+| P0 | Ambient OTel sampler, span-limit, or SDK-disable variables could silently drop or truncate explicitly admitted telemetry | Own sampler and span limits in bootstrap; reject ambient global disable | Hosted implementation evidence GREEN on `782445a...` / 36880180730 |
+| P1 | Mixed-case HTTP `traceparent` fields lost valid parent identity, while a value-dependent duplicate sentinel was order-sensitive | Match the field name case-insensitively while rejecting duplicate case variants independently of value | Hosted implementation evidence GREEN on `782445a...` / 36880180730 |
 | P0 | No independent current-head approval | Complete review after all exact-head checks; repair every actionable finding | Open |
 | P0 | No immutable release or consumer pin | Merge normally, build from protected main, publish hashes and contract evidence, then bump the consumer to the released artifact | Blocked by PR |
 | P0 | Live backend, SIEM, credential rotation, retention, and persistent-volume recovery are unverified | Run an operator-owned staging exercise with redacted evidence and rollback | Open |
