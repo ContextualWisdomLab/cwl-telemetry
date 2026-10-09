@@ -1,0 +1,695 @@
+"""Executable version-one safety contract for the shared runtime."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import threading
+from collections.abc import Mapping
+
+import pytest
+
+
+def test_import_has_no_network_or_worker_side_effect() -> None:
+    """Merely importing the package cannot connect or start export workers."""
+    code = """
+import socket, threading
+def deny(*args, **kwargs):
+    raise AssertionError('import attempted network traffic')
+socket.socket.connect = deny
+before = {thread.ident for thread in threading.enumerate()}
+import cwl_telemetry
+assert {thread.ident for thread in threading.enumerate()} == before
+"""
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_config_requires_identity_and_secure_receiver() -> None:
+    """A receiver and source identity are validated before startup."""
+    from cwl_telemetry import TelemetryConfig
+
+    with pytest.raises(ValueError):
+        TelemetryConfig(service="", version="1", environment="dev", source_revision="a" * 40)
+    with pytest.raises(ValueError):
+        TelemetryConfig(service="svc", version="1", environment="dev", source_revision="missing")
+    with pytest.raises(ValueError):
+        TelemetryConfig(
+            service="svc", version="1", environment="dev", source_revision="a" * 40,
+            receiver="http://collector.example:4318",
+        )
+    for malformed in ("a" * 16 + "\r\nInjected: x", "a" * 16 + "\x7f", "a" * 16 + "é"):
+        with pytest.raises(ValueError, match="token"):
+            TelemetryConfig(
+                service="svc", version="1", environment="dev", source_revision="a" * 40,
+                receiver="https://collector.example:4318", token=malformed,
+            )
+
+
+def test_event_admission_rejects_raw_secrets_pii_and_unknown_fields() -> None:
+    """Only bounded, classified event fields enter the export path."""
+    from cwl_telemetry import TelemetryEvent, validate_event
+
+    valid = TelemetryEvent(
+        name="authentication.denied", severity="WARN", classification="internal",
+        purpose_code="security_investigation", kind="security",
+        attributes={"operation_code": "login", "tenant_ref": "t_123", "event_id": "a" * 32,
+                    "source_location": "backend/auth.py:42"},
+    )
+    assert validate_event(valid) is valid
+    with pytest.raises(ValueError):
+        validate_event(TelemetryEvent(
+            name="debug.dump", severity="WARN", classification="internal",
+            purpose_code="security_investigation", kind="security",
+        ))
+    for attributes in (
+        {"Authorization": "Bearer secret"},
+        {"operation_code": "person@example.com"},
+        {"unknown": "value"},
+        {"operation_code": "x" * 200},
+        {"source_location": "../../secrets.env:1"},
+        {"duration_ms": 10 ** 1000},
+    ):
+        with pytest.raises(ValueError):
+            validate_event(TelemetryEvent(
+                name="authentication.denied", severity="WARN", classification="internal",
+                purpose_code="security_investigation", kind="security",
+                attributes={"tenant_ref": "t_123", "event_id": "a" * 32, **attributes},
+            ))
+
+
+def test_reserved_security_name_cannot_bypass_durable_route() -> None:
+    """A reserved security event name cannot be downgraded to operational."""
+    from cwl_telemetry import TelemetryEvent, validate_event
+
+    class UnequalSecurityName(str):
+        """Retain text while trying to evade a finite-vocabulary equality check."""
+
+        __hash__ = str.__hash__
+
+        def __eq__(self, _other):
+            return False
+
+    for name in ("authentication.denied", UnequalSecurityName("authentication.denied")):
+        with pytest.raises(ValueError, match="event name|security event"):
+            validate_event(TelemetryEvent(
+                name=name, severity="INFO", classification="internal",
+                purpose_code="operations", kind="operational",
+            ))
+
+
+def test_security_attributes_are_snapshotted_once_before_export() -> None:
+    """Admission and export must use the same immutable attribute snapshot."""
+    from cwl_telemetry import TelemetryConfig, TelemetryEvent, bootstrap
+
+    class OneShotAttributes(Mapping):
+        def __init__(self) -> None:
+            self.data = {"tenant_ref": "tenant_1", "event_id": "a" * 32}
+            self.item_reads = 0
+
+        def __getitem__(self, key):
+            return self.data[key]
+
+        def __iter__(self):
+            return iter(self.data)
+
+        def __len__(self):
+            return len(self.data)
+
+        def items(self):
+            self.item_reads += 1
+            return self.data.items() if self.item_reads == 1 else {}.items()
+
+    captured = []
+
+    class CapturingLogger:
+        def emit(self, **fields):
+            captured.append(fields)
+
+    attributes = OneShotAttributes()
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+    ))
+    runtime.logger._logger = CapturingLogger()
+    runtime.emit(TelemetryEvent(
+        name="authentication.denied", severity="WARN", classification="internal",
+        purpose_code="security_investigation", kind="security", attributes=attributes,
+    ))
+    runtime.shutdown()
+
+    assert attributes.item_reads == 1
+    assert captured[0]["attributes"]["event_id"] == "a" * 32
+    assert captured[0]["attributes"]["tenant_ref"] == "tenant_1"
+
+
+def test_event_name_is_bounded_before_export() -> None:
+    """An operational event name cannot exceed the bounded OTLP record contract."""
+    from cwl_telemetry import TelemetryEvent, validate_event
+
+    boundary = TelemetryEvent(
+        name="a." + "b" * 126, severity="INFO", classification="internal",
+        purpose_code="operations", kind="operational",
+    )
+    assert validate_event(boundary) is boundary
+    with pytest.raises(ValueError, match="event name"):
+        validate_event(TelemetryEvent(
+            name="a." + "b" * 127, severity="INFO", classification="internal",
+            purpose_code="operations", kind="operational",
+        ))
+
+
+def test_bootstrap_is_explicit_and_product_work_completes() -> None:
+    """An in-process runtime exposes the three safe Ports."""
+    from cwl_telemetry import TelemetryConfig, TelemetryEvent, bootstrap
+
+    config = TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+    )
+    runtime = bootstrap(config)
+    assert runtime.tracer is not None
+    assert runtime.meter is not None
+    assert runtime.logger is not None
+    with runtime.tracer.start_as_current_span("work"):
+        assert 2 + 2 == 4
+    runtime.emit(TelemetryEvent(
+        name="work.completed", severity="INFO", classification="internal",
+        purpose_code="operations", kind="operational", attributes={"operation_code": "work"},
+    ))
+    runtime.shutdown()
+
+
+def test_bootstrap_sampling_is_not_changed_by_process_environment() -> None:
+    """The explicit runtime must not silently inherit process-wide sampling."""
+    code = """
+from cwl_telemetry import TelemetryConfig, bootstrap
+runtime = bootstrap(TelemetryConfig(
+    service='svc', version='1', environment='test', source_revision='a' * 40,
+))
+with runtime.tracer.start_as_current_span('work') as span:
+    assert span._span.is_recording()
+    span.set_attribute('operation_code', 'work')
+    assert span._span.attributes['operation_code'] == 'work'
+runtime.shutdown()
+"""
+    environment = {
+        **os.environ,
+        "OTEL_TRACES_SAMPLER": "always_off",
+        "OTEL_TRACES_SAMPLER_ARG": "0",
+        "OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT": "1",
+    }
+    subprocess.run([sys.executable, "-c", code], env=environment, check=True)
+
+
+def test_bootstrap_rejects_ambient_sdk_disable() -> None:
+    """An explicit bootstrap cannot silently become a disabled no-op runtime."""
+    code = """
+from cwl_telemetry import TelemetryConfig, bootstrap
+try:
+    bootstrap(TelemetryConfig(
+        service='svc', version='1', environment='test', source_revision='a' * 40,
+    ))
+except ValueError as error:
+    assert 'OTEL_SDK_DISABLED' in str(error)
+else:
+    raise AssertionError('ambient SDK disable was silently accepted')
+"""
+    environment = {**os.environ, "OTEL_SDK_DISABLED": "true"}
+    subprocess.run([sys.executable, "-c", code], env=environment, check=True)
+
+
+def test_logger_failure_does_not_fail_work_but_invalid_event_does() -> None:
+    """Delivery failure is noncritical; admission failure remains visible."""
+    from cwl_telemetry import TelemetryConfig, TelemetryEvent, bootstrap
+
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+    ))
+
+    class FailingLogger:
+        """Synthetic failing sink behind the real product Port."""
+
+        def emit(self, **_kwargs):
+            """Fail after admission, like a broken exporter."""
+            raise OSError("receiver unavailable")
+
+    runtime.logger._logger = FailingLogger()
+    event = TelemetryEvent(
+        name="work.completed", severity="INFO", classification="internal",
+        purpose_code="operations", kind="operational", attributes={"operation_code": "work"},
+    )
+    runtime.emit(event)
+    assert runtime.logger.dropped == 1
+    with pytest.raises(ValueError):
+        runtime.emit(TelemetryEvent(
+            name="work.completed", severity="INFO", classification="internal",
+            purpose_code="operations", kind="operational", attributes={"Authorization": "secret"},
+        ))
+    runtime.shutdown()
+
+
+def test_receiver_outage_keeps_transaction_and_credentials_private(caplog) -> None:
+    """An unreachable local TLS receiver cannot turn a product action into failure."""
+    from cwl_telemetry import TelemetryConfig, TelemetryEvent, bootstrap
+
+    token = "sentinel-private-token-12345"
+    config = TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+        receiver="https://127.0.0.1:1", token=token, queue_size=16,
+    )
+    assert token not in repr(config)
+    runtime = bootstrap(config)
+    with runtime.tracer.start_as_current_span("work"):
+        assert 2 + 2 == 4
+    runtime.emit(TelemetryEvent(
+        name="work.completed", severity="INFO", classification="internal",
+        purpose_code="operations", kind="operational", attributes={"operation_code": "work"},
+    ))
+    runtime.shutdown()
+    assert token not in caplog.text
+
+
+def test_temporary_receiver_failure_retries_without_blocking_product_work(monkeypatch) -> None:
+    """A retryable receiver response is delivered after backoff, outside product work."""
+    from requests import Response, Session
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    attempts: list[tuple[str, str | None]] = []
+
+    def post(session, url, **_kwargs):
+        attempts.append((url, session.headers.get("Authorization")))
+        response = Response()
+        response.status_code = 503 if len(attempts) == 1 else 200
+        response.reason = "temporary outage" if response.status_code == 503 else "OK"
+        return response
+
+    monkeypatch.setattr(Session, "post", post)
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+        receiver="https://collector.example", token="synthetic-token-12345", queue_size=16,
+    ))
+    with runtime.tracer.start_as_current_span("work"):
+        assert 2 + 2 == 4
+    assert runtime._providers[0].force_flush(timeout_millis=5_000)
+    runtime.shutdown()
+    assert attempts == [
+        ("https://collector.example/v1/traces", "Bearer synthetic-token-12345"),
+        ("https://collector.example/v1/traces", "Bearer synthetic-token-12345"),
+    ]
+
+
+def test_receiver_timeout_drops_without_failing_product_work(monkeypatch) -> None:
+    """A receiver timeout is bounded and cannot turn product work into failure."""
+    from requests import Session
+    from requests.exceptions import Timeout
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    attempts: list[str] = []
+
+    def post(_session, url, **_kwargs):
+        attempts.append(url)
+        raise Timeout("synthetic receiver timeout")
+
+    monkeypatch.setattr(Session, "post", post)
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+        receiver="https://collector.example", token="synthetic-token-12345", queue_size=16,
+    ))
+    with runtime.tracer.start_as_current_span("work"):
+        assert 2 + 2 == 4
+    assert runtime._providers[0].force_flush(timeout_millis=5_000)
+    runtime.shutdown()
+    assert attempts and set(attempts) == {"https://collector.example/v1/traces"}
+
+
+def test_metric_and_span_ports_reject_unbounded_attributes() -> None:
+    """Product code cannot add arbitrary span content or metric labels."""
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+        metric_names=frozenset({"work_total"}), operation_codes=frozenset({"work"}),
+    ))
+    with pytest.raises(ValueError):
+        runtime.tracer.start_as_current_span("work", {"prompt": "secret"})
+    counter = runtime.meter.counter("work_total")
+    with pytest.raises(ValueError):
+        counter.add(1, {"tenant_ref": "t_123"})
+    counter.add(1, {"operation_code": "work", "status": "success"})
+    with pytest.raises(ValueError):
+        counter.add(1, {"operation_code": "per_user_123"})
+    with pytest.raises(ValueError):
+        runtime.meter.counter("unregistered_total")
+    runtime.shutdown()
+
+
+def test_counter_rejects_signed_int64_wire_and_series_overflow() -> None:
+    """Repeated handles share each canonical label series' OTLP wire budget."""
+    from opentelemetry.exporter.otlp.proto.common._internal.metrics_encoder import encode_metrics
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+    from cwl_telemetry import TelemetryConfig, _MeterPort
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader], shutdown_on_exit=False)
+    meter = _MeterPort(provider.get_meter("svc", "1"), TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+        metric_names=frozenset({"work_total"}), operation_codes=frozenset({"a", "b"}),
+    ))
+    counter = meter.counter("work_total")
+    with pytest.raises(ValueError, match="counter increment"):
+        counter.add(1 << 63)
+    labels = {"operation_code": "a", "status": "success"}
+    counter.add((1 << 63) - 2, labels)
+    repeated_handle = meter.counter("work_total")
+    repeated_handle.add(1, {"status": "success", "operation_code": "a"})
+    with pytest.raises(ValueError, match="counter increment"):
+        repeated_handle.add(1, labels)
+    repeated_handle.add(1, {"operation_code": "b", "status": "success"})
+    assert encode_metrics(reader.get_metrics_data()).ByteSize() > 0
+    provider.shutdown()
+
+
+def test_counter_serializes_cross_handle_series_overflow() -> None:
+    """Concurrent handles cannot race the same cumulative series past int64."""
+    from opentelemetry.sdk.metrics import MeterProvider
+    from cwl_telemetry import TelemetryConfig, _MeterPort
+
+    provider = MeterProvider(shutdown_on_exit=False)
+    meter = _MeterPort(provider.get_meter("svc", "1"), TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+        metric_names=frozenset({"work_total"}), operation_codes=frozenset({"work"}),
+    ))
+    first = meter.counter("work_total")
+    second = meter.counter("work_total")
+    labels = {"operation_code": "work"}
+    first.add((1 << 63) - 2, labels)
+    barrier = threading.Barrier(3)
+    outcomes: list[str] = []
+
+    def add_at_boundary(counter) -> None:
+        barrier.wait()
+        try:
+            counter.add(1, labels)
+        except ValueError:
+            outcomes.append("rejected")
+        else:
+            outcomes.append("accepted")
+
+    threads = [
+        threading.Thread(target=add_at_boundary, args=(first,)),
+        threading.Thread(target=add_at_boundary, args=(second,)),
+    ]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join()
+    assert sorted(outcomes) == ["accepted", "rejected"]
+    provider.shutdown()
+
+
+def test_valid_log_bursts_stay_within_collector_ingress_limit(monkeypatch) -> None:
+    """Every SDK log and trace batch fits the Collector request limit."""
+    from opentelemetry.exporter.otlp.proto.common._internal._log_encoder import encode_logs
+    from opentelemetry.exporter.otlp.proto.common._internal.trace_encoder import encode_spans
+    from opentelemetry.exporter.otlp.proto.http import _log_exporter
+    from opentelemetry.exporter.otlp.proto.http import trace_exporter
+    from opentelemetry.sdk._logs.export import LogExportResult
+    from opentelemetry.context import attach, detach
+    from opentelemetry.sdk.trace.export import SpanExportResult
+    from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, TraceState, set_span_in_context
+    from cwl_telemetry import TelemetryConfig, TelemetryEvent, bootstrap
+
+    encoded_log_batches: list[tuple[int, int]] = []
+    encoded_span_batches: list[tuple[int, int]] = []
+    exported_span_trace_states: list[int] = []
+
+    class CapturingExporter:
+        """Encode actual SDK batches while replacing only external HTTP delivery."""
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def export(self, batch):
+            encoded_log_batches.append((len(batch), encode_logs(batch).ByteSize()))
+            return LogExportResult.SUCCESS
+
+        def shutdown(self):
+            pass
+
+        def force_flush(self, timeout_millis=30_000):
+            return True
+
+    class CapturingSpanExporter:
+        """Encode actual span batches while replacing only external HTTP delivery."""
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def export(self, batch):
+            encoded_span_batches.append((len(batch), encode_spans(batch).ByteSize()))
+            exported_span_trace_states.extend(len(span.context.trace_state) for span in batch)
+            return SpanExportResult.SUCCESS
+
+        def shutdown(self):
+            pass
+
+        def force_flush(self, timeout_millis=30_000):
+            return True
+
+    monkeypatch.setattr(_log_exporter, "OTLPLogExporter", CapturingExporter)
+    monkeypatch.setattr(trace_exporter, "OTLPSpanExporter", CapturingSpanExporter)
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+        receiver="https://collector.example", token="synthetic-token-12345",
+        route_templates={"/" + "r" * 127},
+    ))
+    attributes = {
+        "operation_code": "o" * 64,
+        "bounded_context": "b" * 64,
+        "tenant_ref": "t" * 64,
+        "workspace_ref": "w" * 64,
+        "principal_ref": "p" * 64,
+        "request_id": "a" * 32,
+        "event_id": "b" * 32,
+        "trace_id": "c" * 32,
+        "span_id": "d" * 16,
+        "resource_ref": "r" * 64,
+        "action": "a" * 64,
+        "result": "r" * 64,
+        "status": "s" * 64,
+        "error_type": "e" * 64,
+        "error_code": "e" * 64,
+        "retry_count": 1_000_000_000,
+        "duration_ms": 1_000_000_000,
+        "dependency": "d" * 64,
+        "provider": "p" * 64,
+        "provenance_ref": "v" * 64,
+        "http_route": "/" + "r" * 127,
+        "source_location": "s" * 96 + ":9999999",
+    }
+    parent = SpanContext(
+        trace_id=int("1" * 32, 16), span_id=int("2" * 16, 16), is_remote=True,
+        trace_flags=TraceFlags(1),
+        trace_state=TraceState([(f"vendor{i}", "v" * 250) for i in range(20)]),
+    )
+    token = attach(set_span_in_context(NonRecordingSpan(parent)))
+    try:
+        for _ in range(128):
+            with runtime.tracer.start_as_current_span("s" * 64, attributes):
+                pass
+            runtime.emit(TelemetryEvent(
+                name="a." + "b" * 126, severity="INFO", classification="internal",
+                purpose_code="operations", kind="operational", attributes=attributes,
+            ))
+    finally:
+        detach(token)
+    runtime.shutdown()
+
+    assert sum(count for count, _size in encoded_log_batches) == 128
+    assert sum(count for count, _size in encoded_span_batches) == 128
+    assert all(count <= 16 and size <= 65_536 for count, size in encoded_log_batches)
+    assert all(count <= 16 and size <= 65_536 for count, size in encoded_span_batches)
+    assert exported_span_trace_states == [0] * 128
+
+
+def test_span_context_does_not_record_exception_content() -> None:
+    """A product exception must not become an automatic OTLP event."""
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+    ))
+    with pytest.raises(RuntimeError):
+        with runtime.tracer.start_as_current_span("work") as span:
+            raise RuntimeError("synthetic-secret-in-exception")
+    assert span._span.events == ()
+    runtime.shutdown()
+
+
+def test_span_route_requires_declared_template_and_rejects_raw_path() -> None:
+    """Frameworks can label a route without adding request identifiers."""
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+        route_templates={"/api/items/{item_id}"},
+    ))
+    with runtime.tracer.start_as_current_span("http_request") as span:
+        span.set_attribute("http_route", "/api/items/{item_id}")
+        with pytest.raises(ValueError):
+            span.set_attribute("http_route", "/api/items/secret-123")
+        with pytest.raises(ValueError):
+            span.set_attribute("http_url", "https://example/private?token=secret")
+        assert not hasattr(span, "record_exception")
+    runtime.shutdown()
+
+
+def test_receiver_rejects_url_control_characters_and_label_sets() -> None:
+    """Configuration cannot smuggle a different endpoint or unlimited labels."""
+    from cwl_telemetry import TelemetryConfig
+
+    base = dict(service="svc", version="1", environment="test", source_revision="a" * 40)
+    with pytest.raises(ValueError):
+        TelemetryConfig(**base, receiver="https://collector.example\n.evil", token="x" * 16)
+    with pytest.raises(ValueError):
+        TelemetryConfig(**base, receiver="https://@collector.example", token="x" * 16)
+    with pytest.raises(ValueError):
+        TelemetryConfig(**base, metric_names=["same", "same"])
+    with pytest.raises(ValueError):
+        TelemetryConfig(**base, operation_codes={f"item_{n}" for n in range(129)})
+
+
+def test_w3c_trace_propagation_preserves_identity_without_baggage() -> None:
+    """A remote parent is correlated without copying arbitrary inbound headers."""
+    from opentelemetry.baggage import get_baggage, set_baggage
+    from opentelemetry.context import attach, detach
+    from opentelemetry.trace import get_current_span
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+    ))
+    parent = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+    context = runtime.extract_trace({"TrAcEpArEnT": parent, "baggage": "person@example.com"})
+    context = set_baggage("secret", "person@example.com", context=context)
+    token = attach(context)
+    try:
+        with runtime.tracer.start_as_current_span("work") as outer:
+            assert get_baggage("secret") is None
+            outbound = runtime.inject_trace()
+            with runtime.tracer.start_as_current_span("nested") as inner:
+                assert get_baggage("secret") is None
+                assert inner._span.parent.span_id == outer._span.context.span_id
+            assert get_baggage("secret") is None
+        assert get_baggage("secret") == "person@example.com"
+    finally:
+        detach(token)
+    assert outbound["traceparent"].split("-")[1] == "a" * 32
+    assert set(outbound) == {"traceparent"}
+    assert runtime.inject_trace() == {}
+    assert runtime.extract_trace({"traceparent": "garbage"}) is not None
+    for duplicate_headers in (
+        {"traceparent": None, "TraceParent": parent},
+        {"traceparent": parent, "TraceParent": None},
+        {"traceparent": parent, "TraceParent": parent},
+    ):
+        ambiguous = runtime.extract_trace(duplicate_headers)
+        assert not get_current_span(ambiguous).get_span_context().is_valid
+
+    class OneShotHeaders(Mapping):
+        """Expose headers through one immutable traversal only."""
+
+        item_reads = 0
+
+        def __getitem__(self, _key):
+            raise AssertionError("trace extraction should use one items snapshot")
+
+        def __iter__(self):
+            raise AssertionError("trace extraction should use one items snapshot")
+
+        def __len__(self):
+            raise AssertionError("trace extraction should use one items snapshot")
+
+        def items(self):
+            self.item_reads += 1
+            return [("TRACEPARENT", parent), ("baggage", "person@example.com")]
+
+    one_shot_headers = OneShotHeaders()
+    one_shot_context = runtime.extract_trace(one_shot_headers)
+    assert one_shot_headers.item_reads == 1
+    assert get_current_span(one_shot_context).get_span_context().trace_id == int("a" * 32, 16)
+    runtime.shutdown()
+
+
+def test_resource_identity_is_exact_and_private() -> None:
+    """Resource identity uses the caller's exact build/source revision."""
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1.2.3", environment="prod", source_revision="a" * 40,
+    ))
+    resource = runtime._providers[0].resource.attributes
+    assert resource["service.name"] == "svc"
+    assert resource["service.version"] == "1.2.3"
+    assert resource["deployment.environment.name"] == "prod"
+    assert resource["cwl.source_revision"] == "a" * 40
+    runtime.shutdown()
+
+
+def test_bounded_span_queue_reports_saturation_and_recovers(monkeypatch, caplog) -> None:
+    """A stuck receiver drops old spans without blocking work; newer work drains."""
+    from opentelemetry.exporter.otlp.proto.http import trace_exporter
+    from opentelemetry.sdk.trace.export import SpanExportResult
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    release = threading.Event()
+    exported: list[str] = []
+
+    class PausedExporter:
+        def __init__(self, **_kwargs):
+            pass
+
+        def export(self, spans):
+            release.wait(3)
+            exported.extend(span.name for span in spans)
+            return SpanExportResult.SUCCESS
+
+        def shutdown(self):
+            pass
+
+        def force_flush(self, timeout_millis=30000):
+            return True
+
+    monkeypatch.setattr(trace_exporter, "OTLPSpanExporter", PausedExporter)
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+        receiver="https://collector.example", token="synthetic-token-12345", queue_size=16,
+    ))
+    for _ in range(80):
+        with runtime.tracer.start_as_current_span("saturated"):
+            pass
+    with runtime.tracer.start_as_current_span("recovered"):
+        pass
+    release.set()
+    runtime.shutdown()
+    assert "Queue full, dropping Span" in caplog.text
+    assert "recovered" in exported
+    assert len(exported) < 81
+
+
+def test_shutdown_closes_other_providers_after_one_exporter_failure() -> None:
+    """Shutdown failure is counted without skipping later provider cleanup."""
+    from cwl_telemetry import TelemetryConfig, bootstrap
+
+    runtime = bootstrap(TelemetryConfig(
+        service="svc", version="1", environment="test", source_revision="a" * 40,
+    ))
+    class FailingProvider:
+        def shutdown(self):
+            raise OSError("synthetic exporter outage")
+
+    remaining = runtime._providers[1:]
+    runtime._providers = (FailingProvider(), *remaining)
+    runtime.shutdown()
+    assert runtime.shutdown_failures == 1

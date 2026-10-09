@@ -1,0 +1,53 @@
+name: Prepare telemetry release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cwl-telemetry-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.13'
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: '0.12.3'
+      - run: uv sync --locked --group dev --no-install-project
+      - run: uv sync --locked --group dev --no-build-isolation
+      - run: uv run --no-sync pytest -q
+      - run: uv build --no-build-isolation
+      - run: tar -tzf dist/*.tar.gz | grep 'collector/production.yaml$' > /dev/null
+      - name: Create reviewable draft with exact-source artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse origin/main)" = "$GITHUB_SHA"
+          version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          tag="v${version}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null; then
+            echo 'Version tag already exists' >&2
+            exit 1
+          fi
+          cp collector/production.yaml dist/cwl-otelcol-production.yaml
+          (cd dist && sha256sum ./*.whl ./*.tar.gz ./cwl-otelcol-production.yaml > SHA256SUMS)
+          gh release create "$tag" dist/*.whl dist/*.tar.gz dist/cwl-otelcol-production.yaml dist/SHA256SUMS \
+            --draft --target "$GITHUB_SHA" --title "$tag" \
+            --notes 'Draft release for independent review. Verify current-head checks, artifact hashes, and consumer migration before publication.'
