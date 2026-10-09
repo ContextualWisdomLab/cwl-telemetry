@@ -4,6 +4,12 @@ All notable changes to this unreleased package are recorded here.
 
 ## Unreleased
 
+### Added
+
+- Add contributor, architecture, and security/operability continuation guides
+  that preserve the telemetry owner boundary, exact-head evidence rules, and
+  fail-closed recovery procedures.
+
 ### Fixed
 
 - Prevent reserved security event names from bypassing the durable security
